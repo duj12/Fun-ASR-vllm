@@ -1,12 +1,10 @@
-# Fun-ASR
+# Fun-ASR vLLM Acceleration
 
+This repository provides an accelerated implementation of [Fun-ASR](https://github.com/FunAudioLLM/Fun-ASR) using [vLLM](https://github.com/vllm-project/vllm). By leveraging vLLM's efficient attention mechanisms and memory management, this project significantly boosts the inference performance of Fun-ASR models while maintaining accuracy.
 
+## Environment Setup 🐍
 
-Fun-ASR 
-
-
-
-# Environment Setup 🐍
+To get started, clone the repository and install the required dependencies:
 
 ```shell
 git clone https://github.com/yuekaizhang/Fun-ASR-vllm.git
@@ -17,17 +15,17 @@ uv pip install -r requirements.txt
 
 <a name="usage-tutorial"></a>
 
-# TODO
+## Roadmap 📝
 
-- [ ] Support encoder TensorRT
-- [ ] Support batch > 1 Inference
-- [ ] Support Nvidia Triton Inference Server
+- [ ] Support TensorRT acceleration for the encoder
+- [ ] Support batch inference (Batch size > 1)
+- [ ] Integration with Nvidia Triton Inference Server
 
-# Usage 🛠️
+## Usage 🛠️
 
-## Inference
+### Python API Inference
 
-### Direct Inference
+You can run inference directly using the Python API:
 
 ```python
 from model import FunASRNano
@@ -35,16 +33,22 @@ from vllm import LLM, SamplingParams
 
 def main():
     model_dir = "FunAudioLLM/Fun-ASR-Nano-2512"
+    # Load the base model
     m, kwargs = FunASRNano.from_pretrained(model=model_dir, device="cuda:0")
     m.eval()
+    
+    # Initialize vLLM
     vllm = LLM(model="yuekai/Fun-ASR-Nano-2512-vllm", enable_prompt_embeds=True, gpu_memory_utilization=0.4)
     sampling_params = SamplingParams(
         top_p=0.001,
         max_tokens=500,
     )
+    
+    # Attach vLLM to the model
     m.vllm = vllm
     m.vllm_sampling_params = sampling_params
 
+    # Run inference
     wav_path = f"{kwargs['model_path']}/example/zh.mp3"
     res = m.inference(data_in=[wav_path], **kwargs)
     print(res)
@@ -56,8 +60,9 @@ if __name__ == "__main__":
     main()
 ```
 
+### Running Benchmarks
 
-### Benchmark Test
+To evaluate performance on a dataset (e.g., SpeechIO):
 
 ```bash
 dataset_name="yuekai/speechio"
@@ -71,7 +76,21 @@ uv run python \
     --subset_name $subset_name \
     --split_name $split_name \
     --batch_size 1 \
-    --log_dir ./logs_vllm_test2_$dataset_name_$subset_name \
+    --log_dir ./logs_vllm_$dataset_name_$subset_name \
     --vllm_model_dir yuekai/Fun-ASR-Nano-2512-vllm
 ```
 
+## Performance 🚀
+
+We compared the performance of the standard HuggingFace PyTorch implementation against our vLLM-accelerated version.
+
+**Benchmark Details:**
+- **Dataset:** [SPEECHIO_ASR_ZH00007](https://github.com/SpeechColab/Leaderboard) (approx. 1 hour of audio)
+- **Hardware:** Single NVIDIA H20 GPU
+
+| Mode | Decoding Time | RTF | RTFx | CER | Note |
+|------|---------------|-----|------|-----|------|
+| Huggingface PyTorch | 218.2 Secs | 0.06 | 16.5 | 7.02% | batch_size=1 |
+| **vLLM (Qwen3-0.6B)** | **145.6 Secs** | **0.04** | **24.7** | **6.99%** | batch_size=1 |
+
+*Note: RTF (Real Time Factor) - lower is better; RTFx (Speedup factor) - higher is better.*
