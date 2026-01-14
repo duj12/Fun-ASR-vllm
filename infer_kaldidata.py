@@ -19,6 +19,11 @@ from collections import defaultdict
 from funasr.utils.load_utils import extract_fbank
 from torch.nn.utils.rnn import pad_sequence
 from tn.chinese.normalizer import Normalizer as ZhNormalizer
+try:
+    from tn.english.normalizer import Normalizer as EnNormalizer
+except ImportError:
+    print("Warning: tn.english.normalizer not found, English normalization will be disabled")
+    EnNormalizer = None
 import torchaudio
 import json
 
@@ -401,6 +406,13 @@ def get_args():
         default=None,
         help="Comma-separated list of GPU indices to use (e.g., 0,1,2,3)"
     )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="auto",
+        choices=["auto", "zh", "en"],
+        help="Language for text normalization. 'auto' will detect language automatically"
+    )
     return parser.parse_args()
 
 class DataCollator:
@@ -531,6 +543,78 @@ def split_data_for_multiprocess(wav_scp_path, text_path, num_parts, output_dir):
     
     return wav_scp_parts, text_parts
 
+def detect_language(text: str) -> str:
+    """检测文本语言"""
+    if not text:
+        return "zh"  # 默认中文
+    
+     # 去除所有中英文标点符号
+    text_no_punct = re.sub(r'[^\w\s\u4e00-\u9fff]', '', text)
+
+    # 中文字符范围：\u4e00-\u9fff
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text_no_punct)
+    num_chinese_chars = len(chinese_chars)
+
+    # 英文单词（连续的英文字母） 
+    english_words = re.findall(r'\b[a-zA-Z]+\b', text_no_punct)
+    num_english_words = len(english_words)
+
+    text = str(text)
+    total = len(text)
+    if total == 0:
+        return 'zh'
+
+    en_count = sum(1 for c in text if ord(c) < 128)
+    if en_count / total > 0.8:
+        return 'en'
+    else:
+        return 'zh'
+
+def normalize_text(text: str, language: str = "auto", args=None) -> str:
+    """根据语言进行文本正则化"""
+    if not text:
+        return text
+    
+    # 自动检测语言
+    if language == "auto":
+        language = detect_language(text)
+    
+    # 中文正则化
+    if language == "zh":
+        # Normalize full-width characters to half-width
+        text = unicodedata.normalize("NFKC", text)
+        
+        # 初始化中文正则器
+        if not hasattr(normalize_text, 'zh_tn_model'):
+            normalize_text.zh_tn_model = ZhNormalizer(
+                cache_dir="./cache",
+                remove_erhua=False,
+                remove_interjections=False,
+                remove_puncts=True,
+                overwrite_cache=False,
+            )
+        # 正则+去标点
+        normalized = normalize_text.zh_tn_model.normalize(text)
+        return normalized
+    
+    # 英文正则化
+    elif language == "en" and EnNormalizer is not None:
+        # 初始化英文正则器
+        if not hasattr(normalize_text, 'en_tn_model'):
+            normalize_text.en_tn_model = EnNormalizer(
+                cache_dir="./cache",
+                overwrite_cache=False,
+            )
+        # 正则
+        normalized = normalize_text.en_tn_model.normalize(text)        
+        # 保留字母、数字、中文、空白、连字符和所有格撇号
+        text_no_punct = re.sub(r'[^\w\s\u4e00-\u9fff\-\']', '', normalized)
+        # 英文文本不转大写
+        return text_no_punct
+    
+    # 如果没有英文正则器或语言不支持，返回原文本
+    return text
+
 def run_inference_on_process(process_idx, gpu_id, wav_scp, text_path, args_dict, output_dir):
     """单进程推理函数"""
     # 重新解析参数
@@ -611,20 +695,6 @@ def run_inference_on_process(process_idx, gpu_id, wav_scp, text_path, args_dict,
         shuffle=False
     )
 
-    zh_tn_model = ZhNormalizer(
-        cache_dir="./cache",
-        remove_erhua=False,
-        remove_interjections=False,
-        remove_puncts=True,
-        overwrite_cache=False,
-    )
-    
-    def normalize_text(text):
-        # Normalize full-width characters to half-width
-        text = unicodedata.normalize("NFKC", text)
-        text = normalize_text_alimeeting(text)
-        return zh_tn_model.normalize(text)
-
     results = []
     all_hypotheses_itn = {}  # 存储原始识别结果
     all_hypotheses_tn = {}   # 存储正则化后结果
@@ -684,13 +754,21 @@ def run_inference_on_process(process_idx, gpu_id, wav_scp, text_path, args_dict,
         for cut_id, ref, hyp in zip(batch_ids, batch_refs, response):
             # 原始识别结果
             hyp_itn = hyp.strip()
-            # 正则化后结果
-            hyp_tn = normalize_text(hyp_itn).upper()
             
-            # 如果有参考文本，则进行正则化
+            # 正则化后结果
+            # 如果有参考文本，使用参考文本的语言，否则使用预测文本的语言
             if ref:
-                ref = normalize_text(ref).upper()
-                results.append((cut_id, ref, hyp_tn))
+                lang = detect_language(ref) if args.language == "auto" else args.language
+                ref_tn = normalize_text(ref, language=lang, args=args)
+            else:
+                lang = detect_language(hyp_itn) if args.language == "auto" else args.language
+                ref_tn = ""
+            
+            hyp_tn = normalize_text(hyp_itn, language=lang, args=args)
+            
+            # 如果有参考文本，则添加到结果中
+            if ref:
+                results.append((cut_id, ref_tn, hyp_tn))
             
             # 保存两种结果
             all_hypotheses_itn[cut_id] = hyp_itn
@@ -806,20 +884,6 @@ def run_single_gpu_inference(args):
         shuffle=False
     )
 
-    zh_tn_model = ZhNormalizer(
-        cache_dir="./cache",
-        remove_erhua=False,
-        remove_interjections=False,
-        remove_puncts=True,
-        overwrite_cache=False,
-    )
-    
-    def normalize_text(text):
-        # Normalize full-width characters to half-width
-        text = unicodedata.normalize("NFKC", text)
-        text = normalize_text_alimeeting(text)
-        return zh_tn_model.normalize(text)
-
     results = []
     all_hypotheses_itn = {}  # 存储原始识别结果
     all_hypotheses_tn = {}   # 存储正则化后结果
@@ -879,13 +943,21 @@ def run_single_gpu_inference(args):
         for cut_id, ref, hyp in zip(batch_ids, batch_refs, response):
             # 原始识别结果
             hyp_itn = hyp.strip()
-            # 正则化后结果
-            hyp_tn = normalize_text(hyp_itn).upper()
             
-            # 如果有参考文本，则进行正则化
+            # 正则化后结果
+            # 如果有参考文本，使用参考文本的语言，否则使用预测文本的语言
             if ref:
-                ref = normalize_text(ref).upper()
-                results.append((cut_id, ref, hyp_tn))
+                lang = detect_language(ref) if args.language == "auto" else args.language
+                ref_tn = normalize_text(ref, language=lang, args=args)
+            else:
+                lang = detect_language(hyp_itn) if args.language == "auto" else args.language
+                ref_tn = ""
+            
+            hyp_tn = normalize_text(hyp_itn, language=lang, args=args)
+            
+            # 如果有参考文本，则添加到结果中
+            if ref:
+                results.append((cut_id, ref_tn, hyp_tn))
             
             # 保存两种结果
             all_hypotheses_itn[cut_id] = hyp_itn
