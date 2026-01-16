@@ -640,6 +640,7 @@ def run_inference_on_process(process_idx, gpu_id, wav_scp, text_path, args_dict,
 
     if args.vllm_model_dir is not None:
         
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"  # 默认后端为Flash-Attn, 改为FlashInfer
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         from vllm import LLM, SamplingParams
         from vllm.config import CompilationConfig   

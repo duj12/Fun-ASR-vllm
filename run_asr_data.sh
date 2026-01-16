@@ -18,15 +18,16 @@ datasets0=(
     "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
 )
 
+    # "/data/megastore/SHARE/TTS/VoiceClone2/Live_LuoYonghao/Live_LuoYonghao"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/TTS_unlab/TTS_unlab"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/20240122/20240122"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/20241014/20241014"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/20241014_en/20241014_en"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/20241021/20241021"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/20241021_en/20241021_en"
+    # "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16/HighQuality16"
+
 datasets1=(
-    "/data/megastore/SHARE/TTS/VoiceClone2/Live_LuoYonghao/Live_LuoYonghao"
-    "/data/megastore/SHARE/TTS/VoiceClone2/TTS_unlab/TTS_unlab"
-    "/data/megastore/SHARE/TTS/VoiceClone2/20240122/20240122"
-    "/data/megastore/SHARE/TTS/VoiceClone2/20241014/20241014"
-    "/data/megastore/SHARE/TTS/VoiceClone2/20241014_en/20241014_en"
-    "/data/megastore/SHARE/TTS/VoiceClone2/20241021/20241021"
-    "/data/megastore/SHARE/TTS/VoiceClone2/20241021_en/20241021_en"
-    "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16/HighQuality16"
     "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16_en/HighQuality16_en"
 
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/20240129/20240129"
@@ -46,7 +47,33 @@ datasets1=(
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/20240930_en/20240930_en"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/20241007/20241007"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/20241007_en/20241007_en"
+    
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241028/20241028"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241028_en/20241028_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241104/20241104"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241104_en/20241104_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241111/20241111"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241111_en/20241111_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241118/20241118"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241118_en/20241118_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241125/20241125"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241125_en/20241125_en"
+    
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/MidQuality1/MidQuality1"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/MidQuality1_en/MidQuality1_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality10/HighQuality10"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality10_en/HighQuality10_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality12/HighQuality12"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality12_en/HighQuality12_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality13/HighQuality13"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality13_en/HighQuality13_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality14/HighQuality14"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality14_en/HighQuality14_en"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15/HighQuality15"
+    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15_en/HighQuality15_en"
+)
 
+datasets2=(    
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality1/HighQuality1"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality1_en/HighQuality1_en"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality2/HighQuality2"
@@ -82,30 +109,7 @@ datasets1=(
 )
 
 
-datasets2=( 
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/MidQuality1/MidQuality1"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/MidQuality1_en/MidQuality1_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality10/HighQuality10"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality10_en/HighQuality10_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality12/HighQuality12"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality12_en/HighQuality12_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality13/HighQuality13"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality13_en/HighQuality13_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality14/HighQuality14"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality14_en/HighQuality14_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15/HighQuality15"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15_en/HighQuality15_en"
-
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241028/20241028"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241028_en/20241028_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241104/20241104"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241104_en/20241104_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241111/20241111"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241111_en/20241111_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241118/20241118"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241118_en/20241118_en"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241125/20241125"
-    "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/20241125_en/20241125_en"
+datasets3=( 
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality17/HighQuality17"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality17_en/HighQuality17_en"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality18/HighQuality18"
@@ -150,6 +154,7 @@ for dataset in "${datasets1[@]}"; do
      --batch_size 32    \
      --log_dir $dataset  \
      --vllm_model_dir ./yuekai/Fun-ASR-Nano-2512-vllm \
+     --model_dir ./FunAudioLLM/Fun-ASR-Nano-2512  \
      --multiprocess --num_processes 8 --gpu_list 0,1,2,3,4,5,6,7
 
 done
