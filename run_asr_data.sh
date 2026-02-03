@@ -175,11 +175,11 @@ for dataset in "${datasets4[@]}"; do
     sub=$(basename "$dataset")
     echo "run $sub"
     
-    python kaldi_text_normalizer.py \
+    python -u kaldi_text_normalizer.py \
     --input $dataset/text \
-    --output $dataset/text_tn \
+    --output $dataset/text_tn
 
-    python kaldi_text_itn.py \
+    python -u kaldi_text_itn.py \
     --input $dataset/text \
     --output $dataset/text_itn
 done
@@ -192,7 +192,7 @@ done
 #     echo "run $sub"
 #     cp $dataset/text $dataset/text_tn
 
-#     python kaldi_text_itn.py \
+#     python -u kaldi_text_itn.py \
 #     --input $dataset/text_punc \
 #     --output $dataset/text_itn
 # done

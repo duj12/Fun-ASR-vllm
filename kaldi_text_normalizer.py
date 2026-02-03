@@ -104,9 +104,10 @@ def normalize_text(text: str, language: str = "auto") -> str:
             # 正则
             normalized = normalize_text.en_tn_model.normalize(text)        
             # 保留字母、数字、中文、空白、连字符和所有格撇号
-            text_no_punct = re.sub(r'[^\w\s\u4e00-\u9fff\-\']', '', normalized)
-            # 英文文本不转大写
-            return text_no_punct
+            text_no_punct = re.sub(r'[^\w\s\u4e00-\u9fff\-\']', ' ', normalized)            
+            # 清理多余的空格（如果有连续空格产生的话）
+            cleaned_text = re.sub(r'\s+', ' ', text_no_punct).strip()
+            return cleaned_text
         except ImportError:
             print("Warning: tn.english.normalizer not found, English normalization will be skipped", file=sys.stderr)
             return text

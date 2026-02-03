@@ -70,8 +70,9 @@ def inverse_normalize_text(text: str, language: str = "auto") -> str:
     
     # 中文反正则
     if language == "zh":
+        # 去掉下面的转换，保持中文标点
         # Normalize full-width characters to half-width
-        text = unicodedata.normalize("NFKC", text)
+        # text = unicodedata.normalize("NFKC", text)  
         
         # 导入中文文本反正则化工具
         try:
@@ -85,6 +86,13 @@ def inverse_normalize_text(text: str, language: str = "auto") -> str:
         except ImportError:
             print("Warning: itn.chinese.inverse_normalizer not found, Chinese itn will be skipped", file=sys.stderr)
             return text
+    elif language == "en":
+        #  确保是英文标点
+        text = unicodedata.normalize("NFKC", text)
+        # 去掉标点前面的空格
+        text = re.sub(r'\s+([,.!?;:])(?!\d)', r'\1', text)
+        # 匹配英文标点符号（,.!?;:）后面没有空格的情况，并添加空格
+        text = re.sub(r'([,.!?;:])(?=\S)(?<!\d[.,])(?!\s*[\)\]’”])', r'\1 ', text)
     
     return text
 
@@ -191,7 +199,7 @@ def main():
         normalized_text = inverse_normalize_text(text, language=args.language)
         
         if args.verbose:
-            progress_iter.write(f"处理 {utt_id}: 规范化完成")
+            progress_iter.write(f"处理 {utt_id}: 规范化完成 {text}\n -> {normalized_text}")
         
         normalized_data.append((utt_id, normalized_text))
             
@@ -201,11 +209,7 @@ def main():
     except Exception as e:
         print(f"错误: 无法写入输出文件 {args.output}: {str(e)}", file=sys.stderr)
         sys.exit(1)
-    
-    # 计算总耗时和平均速度
-    total_time = time.time() - start_time
-    avg_speed = len(data) / total_time if total_time > 0 else 0
-    
+        
     # 写入规范化后的结果
     try:
         write_kaldi_format(normalized_data, args.output)
