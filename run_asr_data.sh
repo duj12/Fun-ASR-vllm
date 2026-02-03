@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
-datasets0=(  
-    "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN"
-    "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN"
-    "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_KeSpeech/ASR_KeSpeech"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_WenetSpeech/ASR_WenetSpeech"
-    "/data/megastore/SHARE/TTS/VoiceClone/Mandarin/Mandarin"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_CN5k/ASR_CN5k"
-    "/data/megastore/SHARE/TTS/VoiceClone/ManEngMix/ManEngMix"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_MLS/ASR_MLS"
-    "/data/megastore/SHARE/TTS/VoiceClone/Conversation/Conversation"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_Refine/ASR_Refine"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
-)
-
-    # "/data/megastore/SHARE/TTS/VoiceClone2/Live_LuoYonghao/Live_LuoYonghao"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/TTS_unlab/TTS_unlab"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/20240122/20240122"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/20241014/20241014"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/20241014_en/20241014_en"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/20241021/20241021"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/20241021_en/20241021_en"
-    # "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16/HighQuality16"
-
 datasets1=(
+    "/data/megastore/SHARE/TTS/VoiceClone2/Live_LuoYonghao/Live_LuoYonghao"
+    "/data/megastore/SHARE/TTS/VoiceClone2/TTS_unlab/TTS_unlab"
+    "/data/megastore/SHARE/TTS/VoiceClone2/20240122/20240122"
+    "/data/megastore/SHARE/TTS/VoiceClone2/20241014/20241014"
+    "/data/megastore/SHARE/TTS/VoiceClone2/20241014_en/20241014_en"
+    "/data/megastore/SHARE/TTS/VoiceClone2/20241021/20241021"
+    "/data/megastore/SHARE/TTS/VoiceClone2/20241021_en/20241021_en"
+    "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16/HighQuality16"
     "/data/megastore/SHARE/TTS/VoiceClone2/HighQuality16_en/HighQuality16_en"
 
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/20240129/20240129"
@@ -144,17 +124,75 @@ datasets3=(
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality32_en/HighQuality32_en"
 )
 
+datasets4=(
+    "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN"
+    "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN"
+    "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix"
+    "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix2/IP_cnenmix2" 
+    "/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili"
+    "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
+)
 
-for dataset in "${datasets1[@]}"; do
-  sub=$(basename "$dataset")
-  echo "run $sub"
+datasets5=(  
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_CN5k/ASR_CN5k"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_English/ASR_English"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_KeSpeech/ASR_KeSpeech"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_WenetSpeech/ASR_WenetSpeech"
+    "/data/megastore/SHARE/TTS/VoiceClone/Mandarin/Mandarin"
+    "/data/megastore/SHARE/TTS/VoiceClone/ManEngMix/ManEngMix"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_MLS/ASR_MLS"
+    "/data/megastore/SHARE/TTS/VoiceClone/Conversation/Conversation"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_Refine/ASR_Refine"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
+)
 
-  python infer_kaldidata.py   \
-     --wav_scp $dataset/wav.scp  \
-     --batch_size 32    \
-     --log_dir $dataset  \
-     --vllm_model_dir ./yuekai/Fun-ASR-Nano-2512-vllm \
-     --model_dir ./FunAudioLLM/Fun-ASR-Nano-2512  \
-     --multiprocess --num_processes 8 --gpu_list 0,1,2,3,4,5,6,7
+# 无标注数据 模型转写为text_itn, 经过正则去标点->text_tn
+# for dataset in "${datasets1[@]}"; do
+#   sub=$(basename "$dataset")
+#   echo "run $sub"
 
+#   python infer_kaldidata.py   \
+#      --wav_scp $dataset/wav.scp  \
+#      --batch_size 32    \
+#      --log_dir $dataset  \
+#      --vllm_model_dir ./yuekai/Fun-ASR-Nano-2512-vllm \
+#      --model_dir ./FunAudioLLM/Fun-ASR-Nano-2512  \
+#      --multiprocess --num_processes 8 --gpu_list 0,1,2,3,4,5,6,7
+
+# done
+
+
+
+# 标注带标点数据，去标点->text_tn, 反正则->text_itn
+for dataset in "${datasets4[@]}"; do
+    sub=$(basename "$dataset")
+    echo "run $sub"
+    
+    python kaldi_text_normalizer.py \
+    --input $dataset/text \
+    --output $dataset/text_tn \
+
+    python kaldi_text_itn.py \
+    --input $dataset/text \
+    --output $dataset/text_itn
 done
+
+
+
+# # 标注数据text->text_tn，添加标点text_punc 反正则-> text_itn
+# for dataset in "${datasets5[@]}"; do
+#     sub=$(basename "$dataset")
+#     echo "run $sub"
+#     cp $dataset/text $dataset/text_tn
+
+#     python kaldi_text_itn.py \
+#     --input $dataset/text_punc \
+#     --output $dataset/text_itn
+# done
