@@ -1,73 +1,38 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Kaldi文本规范化工具
-此脚本用于对Kaldi格式的text文件进行文本规范化处理
-可以根据语言自动检测并应用相应的文本规范化规则
-"""
-
 import argparse
-import sys
-import re
-import unicodedata
 import os
-from typing import List, Tuple
-from tqdm import tqdm
+import re
+import tqdm
 from multiprocessing import Process
-from kaldi_text_normalizer import detect_language, remove_angle_bracket_content
 
+def init_punc():
+    from funasr import AutoModel
+    model = AutoModel(
+        model="ct-punc",
+        model_revision="v2.0.4",
+        disable_pbar=True,
+        disable_log=True,
+        disable_update=True,
+    )
+    return model
 
-def inverse_normalize_text(text: str, language: str = "auto") -> str:
-    """根据语言进行文本反正则化"""
-    if not text:
-        return text
-    
-    # 自动检测语言
-    if language == "auto":
-        language = detect_language(text)
-    
-    # 中文反正则
-    if language == "zh":
-        # 去掉下面的转换，保持中文标点
-        # Normalize full-width characters to half-width
-        # text = unicodedata.normalize("NFKC", text)  
-        
-        # 导入中文文本反正则化工具
-        try:
-            from itn.chinese.inverse_normalizer import InverseNormalizer
-            # 初始化中文反正则器
-            if not hasattr(inverse_normalize_text, 'zh_tn_model'):
-                inverse_normalize_text.zh_tn_model = InverseNormalizer(
-                    cache_dir="./cache",
-                    enable_0_to_9=False, overwrite_cache=True, remove_interjections=False)
-            # 正则+去标点
-            normalized = inverse_normalize_text.zh_tn_model.normalize(text)
-            return normalized
-        except ImportError:
-            print("Warning: itn.chinese.inverse_normalizer not found, Chinese itn will be skipped", file=sys.stderr)
-            return text
-    elif language == "en":
-        #  确保是英文标点
-        text = unicodedata.normalize("NFKC", text)
-        # 去掉标点前面的空格
-        text = re.sub(r'\s+([,.!?;:])(?!\d)', r'\1', text)
-        # 匹配英文标点符号（,.!?;:）后面没有空格的情况，并添加空格
-        text = re.sub(r'([,.!?;:])(?=\S)(?<!\d[.,])(?!\s*[\)\]’”])', r'\1 ', text)
-        # 去掉普通连词符号前后的空格（如"word - word" -> "word-word"）
-        text = re.sub(r'(\w)\s*-\s*(\w)', r'\1-\2', text)
-    
-    return text
+def remove_special_characters(text):
+    pattern = r'[$€£¥￥%@#%&…\(\)\*[\]\{\}×÷+=\/\\|`ˊˋˆˇˉₓ⁰¹²³⁴⁵⁶⁷⁸⁹©®™（）“”，。？！、：；【】;:,.?!"]'
+    text = text.lower()
+    text1 = re.sub(pattern, '', text)
+    text2 = re.sub(r'<[a-zA-Z]+>', '', text1)
+
+    return text2
 
 def mp_process_scp(args, thread_num, gpu_id, start_idx, chunk_num):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    predictor = init_punc()
 
     result = f"{args.mos_res}.{thread_num}"
     print(f"thread id {thread_num}, save result to {result}")
     fout = open(result, 'w', encoding='utf-8')
 
     with open(args.wav_scp, 'r', encoding='utf-8') as fin:
-        for i, line in enumerate(tqdm(fin)):
+        for i, line in enumerate(tqdm.tqdm(fin)):
             if not i in range(start_idx, start_idx + chunk_num):
                 continue
             try:
@@ -76,12 +41,10 @@ def mp_process_scp(args, thread_num, gpu_id, start_idx, chunk_num):
                     print(f"line: {line} not in kaldi format.")
                     continue
                 utt, text = line[0], line[1]
+                text = remove_special_characters(text)
+                text_punc = predictor.generate(input=text)
 
-                text_without_brackets = remove_angle_bracket_content(text)
-                text = text_without_brackets
-                normalized_text = inverse_normalize_text(text)
-
-                fout.write(f"{utt}\t{normalized_text}\n")
+                fout.write(f"{utt}\t{text_punc[0]['text']}\n")
                 fout.flush()
             except Exception as e:
                 print(f"Exception: {e}")

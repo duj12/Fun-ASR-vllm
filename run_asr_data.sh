@@ -131,12 +131,12 @@ datasets4=(
     "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN"
     "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN"
     "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
     "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix"
     "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix2/IP_cnenmix2" 
     "/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili"
     "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
-    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
 )
 
 datasets5=(  
@@ -148,8 +148,8 @@ datasets5=(
     "/data/megastore/SHARE/TTS/VoiceClone/ManEngMix/ManEngMix"
     "/data/megastore/SHARE/TTS/VoiceClone/ASR_MLS/ASR_MLS"
     "/data/megastore/SHARE/TTS/VoiceClone/Conversation/Conversation"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
     "/data/megastore/SHARE/TTS/VoiceClone/ASR_Refine/ASR_Refine"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
     "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
 )
 
@@ -175,13 +175,16 @@ for dataset in "${datasets4[@]}"; do
     sub=$(basename "$dataset")
     echo "run $sub"
     
-    python -u kaldi_text_normalizer.py \
-    --input $dataset/text \
-    --output $dataset/text_tn
+    # python -u kaldi_text_normalizer.py \
+    # -i $dataset/text \
+    # -o $dataset/text_tn \
+    # -n 16
 
     python -u kaldi_text_itn.py \
-    --input $dataset/text \
-    --output $dataset/text_itn
+    -i $dataset/text_punc \
+    -o $dataset/text_itn  \
+    -n 16
+
 done
 
 
