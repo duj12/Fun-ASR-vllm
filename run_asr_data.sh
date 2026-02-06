@@ -131,12 +131,13 @@ datasets4=(
     "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN"
     "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN"
     "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS"
-    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
-    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
     "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix"
     "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix2/IP_cnenmix2" 
     "/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili"
     "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
+    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/test"
 )
 
 datasets5=(  
@@ -170,22 +171,22 @@ datasets5=(
 
 
 
-# 标注带标点数据，去标点->text_tn, 反正则->text_itn
-for dataset in "${datasets4[@]}"; do
-    sub=$(basename "$dataset")
-    echo "run $sub"
+# # 标注带标点数据，去标点->text_tn, 反正则->text_itn
+# for dataset in "${datasets4[@]}"; do
+#     sub=$(basename "$dataset")
+#     echo "run $sub"
     
-    # python -u kaldi_text_normalizer.py \
-    # -i $dataset/text \
-    # -o $dataset/text_tn \
-    # -n 16
+#     # python -u kaldi_text_normalizer.py \
+#     # -i $dataset/text \
+#     # -o $dataset/text_tn \
+#     # -n 16
 
-    python -u kaldi_text_itn.py \
-    -i $dataset/text_punc \
-    -o $dataset/text_itn  \
-    -n 16
+#     python -u kaldi_text_itn.py \
+#     -i $dataset/text_punc \
+#     -o $dataset/text_itn  \
+#     -n 16
 
-done
+# done
 
 
 
@@ -199,3 +200,18 @@ done
 #     --input $dataset/text_punc \
 #     --output $dataset/text_itn
 # done
+
+
+# 数据写成SVS的jsonl格式
+
+for dataset in "${datasets4[@]}"; do
+    sub=$(basename "$dataset")
+    echo "run $sub"
+
+    python -u scp2svsjsonl.py \
+    --wav_scp $dataset/wav.scp \
+    --text_itn $dataset/text_itn \
+    --text_tn $dataset/text_tn \
+    --wav2dur $dataset/wav2dur \
+    --output $dataset/sensevoice.jsonl
+done
