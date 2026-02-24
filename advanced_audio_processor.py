@@ -296,11 +296,39 @@ class AdvancedAudioProcessor:
             logger.error(f"ASR转写失败 {audio_path}: {e}")
             return []
 
+    def cleanup_pcm_files(self, work_dir: str):
+        """
+        清理工作目录中的PCM文件
+        
+        Args:
+            work_dir: 工作目录路径
+        """
+        try:
+            pcm_files = list(Path(work_dir).glob("*.pcm"))
+            deleted_count = 0
+            
+            for pcm_file in pcm_files:
+                try:
+                    pcm_file.unlink()
+                    deleted_count += 1
+                    logger.debug(f"已删除PCM文件: {pcm_file}")
+                except Exception as e:
+                    logger.warning(f"删除PCM文件失败 {pcm_file}: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"清理完成，共删除 {deleted_count} 个PCM文件")
+            else:
+                logger.info("未找到需要清理的PCM文件")
+                
+        except Exception as e:
+            logger.error(f"清理PCM文件时出错: {e}")
+
     def segment_long_audio_by_timestamps(self, 
                                        long_audio_path: str,
                                        short_audio_segments: List[Dict],
                                        output_dir: str,
-                                       package_name: str) -> List[Dict]:
+                                       package_name: str,
+                                       max_edit_distance_ratio: float = 0.3) -> List[Dict]:
         """
         根据短音频的时间戳信息切分长音频（使用模糊匹配）
         
@@ -309,6 +337,7 @@ class AdvancedAudioProcessor:
             short_audio_segments: 短音频段信息列表，每个包含{'sid': str, 'timestamps': List}
             output_dir: 输出目录
             package_name: 包名前缀
+            max_edit_distance_ratio: 最大编辑距离比例阈值（默认0.3）
             
         Returns:
             List[Dict]: 切分结果信息
@@ -337,7 +366,7 @@ class AdvancedAudioProcessor:
             for segment_info in short_audio_segments:
                 sid = segment_info['sid']
                 short_timestamps = segment_info['timestamps']
-                short_text = segment_info.get('text', '')
+                short_text = segment_info.get('text', "")  # 优先使用原始转写文本
                 
                 if not short_text.strip():
                     logger.warning(f"短音频 {sid} 文本为空，跳过")
@@ -345,9 +374,9 @@ class AdvancedAudioProcessor:
                 
                 logger.info(f"处理短音频段 {sid}: {short_text}")
                 
-                # 使用模糊匹配找到最佳位置
+                # 使用模糊匹配找到最佳位置（传入新的阈值参数）
                 matches = self.fuzzy_text_matching(
-                    short_text, long_audio_text, long_timestamps
+                    short_text, long_audio_text, long_timestamps, max_edit_distance_ratio
                 )
                 
                 if matches:
@@ -564,7 +593,8 @@ class AdvancedAudioProcessor:
     def fuzzy_text_matching(self, 
                           target_text: str, 
                           source_text: str,
-                          timestamp_list: List) -> List[Dict]:
+                          timestamp_list: List,
+                          max_edit_distance_ratio: float = 0.3) -> List[Dict]:
         """
         模糊文本匹配，用于处理不完全匹配的情况
         
@@ -572,6 +602,7 @@ class AdvancedAudioProcessor:
             target_text: 目标文本（短音频文本）
             source_text: 源文本（长音频文本）
             timestamp_list: 长音频的时间戳列表
+            max_edit_distance_ratio: 最大编辑距离比例阈值
             
         Returns:
             List[Dict]: 匹配的位置信息
@@ -582,8 +613,8 @@ class AdvancedAudioProcessor:
         # 清理文本（去除标点符号和空格）
         def clean_text(text):
             import re
-            # 保留中文字符和数字
-            cleaned = re.sub(r'[^\u4e00-\u9fff0-9]', '', text)
+            # 保留中文字符和数字， 以及英文字母
+            cleaned = re.sub(r'[^\u4e00-\u9fff0-9a-zA-Z]', '', text)
             return cleaned
         
         clean_target = clean_text(target_text)
@@ -601,7 +632,7 @@ class AdvancedAudioProcessor:
         
         # 如果没有找到足够长的匹配，使用滑动窗口方法
         if not matches or max(match['length'] for match in matches) < len(clean_target) * 0.5:
-            matches = self.sliding_window_matching(clean_target, clean_source, timestamp_list)
+            matches = self.sliding_window_matching(clean_target, clean_source, timestamp_list, max_edit_distance_ratio)
         
         return matches
 
@@ -623,7 +654,7 @@ class AdvancedAudioProcessor:
             window = source[i:i + window_size]
             similarity = self.calculate_similarity(target, window)
             
-            if similarity > 0.6:  # 相似度阈值
+            if similarity > 0.5:  # 相似度阈值
                 # 找到对应的timestamp位置
                 start_pos = self.find_timestamp_position(i, source, timestamp_list)
                 end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
@@ -641,9 +672,15 @@ class AdvancedAudioProcessor:
         
         return matches
 
-    def sliding_window_matching(self, target: str, source: str, timestamp_list: List) -> List[Dict]:
+    def sliding_window_matching(self, target: str, source: str, timestamp_list: List, max_edit_distance_ratio: float = 0.3) -> List[Dict]:
         """
         滑动窗口匹配算法
+        
+        Args:
+            target: 目标文本
+            source: 源文本
+            timestamp_list: 时间戳列表
+            max_edit_distance_ratio: 最大编辑距离比例阈值
         """
         matches = []
         target_len = len(target)
@@ -655,7 +692,8 @@ class AdvancedAudioProcessor:
                 edit_dist = self.calculate_edit_distance(target, window)
                 similarity = 1 - (edit_dist / max(len(target), len(window)))
                 
-                if similarity > 0.5:  # 相似度阈值
+                # 使用传入的阈值参数
+                if similarity > (1 - max_edit_distance_ratio):  # 相似度阈值
                     start_pos = self.find_timestamp_position(i, source, timestamp_list)
                     end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
                     
@@ -809,8 +847,17 @@ class AdvancedAudioProcessor:
             long_audio_transcription = self.transcribe_audio_with_timestamps(separated_path, "Chinese")
             long_audio_text = ''.join([item.text for item in long_audio_transcription]) if long_audio_transcription else ""
             
+            # 保存原始的ASR转写结果（不是时间戳拼接的文本）
+            long_audio_asr_result = self.asr_model.transcribe(
+                audio=[separated_path],
+                language=["Chinese"],
+                return_time_stamps=False,  # 不返回时间戳，获取原始转写文本
+            )
+            long_audio_original_text = long_audio_asr_result[0].text if long_audio_asr_result else ""
+            
             result['transcriptions']['long_audio'] = {
                 'text': long_audio_text,
+                'original_text': long_audio_original_text,  # 保存原始转写文本
                 'timestamps': [
                     {
                         'word': item.text,
@@ -820,10 +867,10 @@ class AdvancedAudioProcessor:
                 ] if long_audio_transcription else []
             }
             
-            # 新增：保存长音频的ASR结果
+            # 新增：保存长音频的ASR结果（使用原始转写文本）
             long_audio_asr_entry = {
                 'sid': package_name,
-                'asrText': long_audio_text,
+                'asrText': long_audio_original_text,  # 使用原始转写文本
                 'type': 'long_audio_original'
             }
             result['asr_results'].append(long_audio_asr_entry)
@@ -858,9 +905,18 @@ class AdvancedAudioProcessor:
                     # 对短音频进行ASR转写
                     short_transcription = self.transcribe_audio_with_timestamps(short_path, "Chinese")
                     
+                    # 获取原始转写文本（不是时间戳拼接的）
+                    short_audio_asr_result = self.asr_model.transcribe(
+                        audio=[short_path],
+                        language=["Chinese"],
+                        return_time_stamps=False,
+                    )
+                    short_original_text = short_audio_asr_result[0].text if short_audio_asr_result else text
+                    
                     short_segment_info = {
                         'sid': sid,
                         'text': ''.join([item.text for item in short_transcription]) if short_transcription else text,
+                        'original_text': short_original_text,  # 保存原始转写文本
                         'timestamps': [
                             {
                                 'word': item.text,
@@ -868,76 +924,47 @@ class AdvancedAudioProcessor:
                                 'end_time': float(item.end_time)
                             } for item in short_transcription
                         ] if short_transcription else [],
-                        'original_text': text
+                        'asr_text': text  # 原始asr.txt中的文本
                     }
                     
                     result['transcriptions']['short_audios'].append(short_segment_info)
                     short_audio_segments.append({
                         'sid': sid,
                         'timestamps': short_transcription,
-                        'text': short_segment_info['text']
+                        'text': short_segment_info['text'],
+                        'original_text': short_original_text
                     })
                     
-                    # 保存原始短音频的ASR结果
+                    # 保存原始短音频的ASR结果（使用原始asr.txt文本）
                     original_short_asr_entry = {
                         'sid': sid,
-                        'asrText': text,
+                        'asrText': short_original_text, 
                         'type': 'short_audio_original'
                     }
                     result['asr_results'].append(original_short_asr_entry)
-                    
-                    # 执行强制对齐（保持原有功能）
-                    try:
-                        alignment_results = self.aligner.align(
-                            audio=short_path,
-                            text=text,
-                            language="Chinese"
-                        )
-                        
-                        if alignment_results:
-                            alignment_data = alignment_results[0]
-                            
-                            # 质量评估
-                            quality_score = self.quality_assessment(
-                                short_audio, short_audio, alignment_data
-                            )
-                            
-                            alignment_info = {
-                                'sid': sid,
-                                'text': text,
-                                'audio_path': short_path,
-                                'alignment': [
-                                    {
-                                        'word': item.text,
-                                        'start_time': float(item.start_time),
-                                        'end_time': float(item.end_time)
-                                    } for item in alignment_data
-                                ],
-                                'quality_score': quality_score
-                            }
-                            
-                            result['alignments'].append(alignment_info)
-                            result['quality_scores'].append(quality_score)
-                            self.stats['successful_alignments'] += 1
-                        else:
-                            self.stats['failed_alignments'] += 1
-                            
-                    except Exception as e:
-                        logger.error(f"对齐失败 {sid}: {e}")
-                        self.stats['failed_alignments'] += 1
             
             # 新增：基于时间戳切分长音频（即使没有短音频也会执行）
+            # 使用较低的相似度阈值（0.3）
             segmentation_results = self.segment_long_audio_by_timestamps(
-                separated_path, short_audio_segments, work_dir, package_name
+                separated_path, short_audio_segments, work_dir, package_name, max_edit_distance_ratio=0.5
             )
             result['segmentations'] = segmentation_results
             
-            # 保存切分后的音频ASR结果
+            # 保存切分后的音频ASR结果（使用原始转写文本）
             for segmentation in segmentation_results:
                 if segmentation['status'] == 'success':
+                    # 对切分后的音频进行ASR转写获取原始文本
+                    segmented_audio_path = segmentation['output_path']
+                    segmented_asr_result = self.asr_model.transcribe(
+                        audio=[segmented_audio_path],
+                        language=["Chinese"],
+                        return_time_stamps=False,
+                    )
+                    segmented_original_text = segmented_asr_result[0].text if segmented_asr_result else segmentation['text']
+                    
                     segmented_asr_entry = {
                         'sid': segmentation['sid'] + '_orig',  # 添加_orig后缀
-                        'asrText': segmentation['text'],
+                        'asrText': segmented_original_text,  # 使用ASR模型的原始转写文本
                         'type': 'short_audio_segmented',
                         'source_sid': segmentation['sid'],  # 原始SID
                         'match_similarity': segmentation.get('similarity', 0),
@@ -947,6 +974,9 @@ class AdvancedAudioProcessor:
             
             # 新增：生成asr.jsonl文件
             self.generate_asr_jsonl(result['asr_results'], work_dir)
+            
+            # 新增：清理解压的PCM文件
+            self.cleanup_pcm_files(work_dir)
             
             result['status'] = 'completed'
             self.stats['transcription_success'] += 1
