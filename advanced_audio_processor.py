@@ -723,7 +723,7 @@ class AdvancedAudioProcessor:
                             package_path: str, 
                             output_base_dir: str) -> Dict:
         """
-        处理单个音频包（新增ASR转写和音频切分功能）
+        处理单个音频包（新增ASR转写和音频切分功能，兼容缺失短音频情况）
         """
         package_name = Path(package_path).stem
         work_dir = os.path.join(output_base_dir, package_name)
@@ -740,6 +740,7 @@ class AdvancedAudioProcessor:
             'segmentations': [],
             'alignments': [],
             'quality_scores': [],
+            'asr_results': [],  # 新增：存储ASR结果用于生成jsonl
             'error': None
         }
         
@@ -764,18 +765,20 @@ class AdvancedAudioProcessor:
                     with zip_ref.open(member) as source, open(target_path, 'wb') as target:
                         target.write(source.read())
             
-            # 查找数据文件（现在直接在work_dir中查找）
+            # 查找数据文件
             asr_file = Path(work_dir) / f"asr.txt"
+            has_asr_file = asr_file.exists()
             
             asr_results = []
-            if not asr_file.exists():
-                logger.error(f"未找到asr.txt文件:{asr_file}")
-            else:
+            if has_asr_file:
+                logger.info(f"找到asr.txt文件: {asr_file}")
                 # 加载ASR结果
                 with open(asr_file, 'r', encoding='utf-8') as f:
                     for line in f:
                         if line.strip():
                             asr_results.append(json.loads(line))
+            else:
+                logger.warning(f"未找到asr.txt文件: {asr_file}，将继续处理长音频")
             
             # 查找长音频（文件名与包名相同）
             long_audio_file = Path(work_dir) / f"{package_name}.pcm"
@@ -804,8 +807,10 @@ class AdvancedAudioProcessor:
         
             # 新增：对长音频进行ASR转写
             long_audio_transcription = self.transcribe_audio_with_timestamps(separated_path, "Chinese")
+            long_audio_text = ''.join([item.text for item in long_audio_transcription]) if long_audio_transcription else ""
+            
             result['transcriptions']['long_audio'] = {
-                'text': ''.join([item.text for item in long_audio_transcription]) if long_audio_transcription else "",
+                'text': long_audio_text,
                 'timestamps': [
                     {
                         'word': item.text,
@@ -815,60 +820,133 @@ class AdvancedAudioProcessor:
                 ] if long_audio_transcription else []
             }
             
+            # 新增：保存长音频的ASR结果
+            long_audio_asr_entry = {
+                'sid': package_name,
+                'asrText': long_audio_text,
+                'type': 'long_audio_original'
+            }
+            result['asr_results'].append(long_audio_asr_entry)
+            
             # 收集短音频段信息
             short_audio_segments = []
             
-            # 处理每个短音频片段
-            for asr_item in asr_results:
-                sid = asr_item['sid']
-                text = asr_item['asrText']
-                
-                if not text.strip():
-                    continue
-                
-                # 查找对应短音频
-                short_audio_file = Path(work_dir) / f"{sid}.pcm"
-                if not short_audio_file.exists():
-                    continue
-                
-                # 加载短音频
-                with open(short_audio_file, 'rb') as f:
-                    short_raw = np.frombuffer(f.read(), dtype=np.int16)
-                    short_audio = short_raw.astype(np.float32) / 32768.0
-                
-                # 保存短音频
-                short_path = os.path.join(work_dir, f"{sid}.wav")
-                sf.write(short_path, short_audio, 16000)
-                
-                # 对短音频进行ASR转写
-                short_transcription = self.transcribe_audio_with_timestamps(short_path, "Chinese")
-                
-                short_segment_info = {
-                    'sid': sid,
-                    'text': ''.join([item.text for item in short_transcription]) if short_transcription else text,
-                    'timestamps': [
-                        {
-                            'word': item.text,
-                            'start_time': float(item.start_time),
-                            'end_time': float(item.end_time)
-                        } for item in short_transcription
-                    ] if short_transcription else [],
-                    'original_text': text
-                }
-                
-                result['transcriptions']['short_audios'].append(short_segment_info)
-                short_audio_segments.append({
-                    'sid': sid,
-                    'timestamps': short_transcription,
-                    'text': short_segment_info['text']
-                })
+            # 处理每个短音频片段（如果存在）
+            if asr_results:
+                for asr_item in asr_results:
+                    sid = asr_item['sid']
+                    text = asr_item['asrText']
+                    
+                    if not text.strip():
+                        continue
+                    
+                    # 查找对应短音频
+                    short_audio_file = Path(work_dir) / f"{sid}.pcm"
+                    if not short_audio_file.exists():
+                        logger.warning(f"短音频文件不存在: {short_audio_file}")
+                        continue
+                    
+                    # 加载短音频
+                    with open(short_audio_file, 'rb') as f:
+                        short_raw = np.frombuffer(f.read(), dtype=np.int16)
+                        short_audio = short_raw.astype(np.float32) / 32768.0
+                    
+                    # 保存短音频
+                    short_path = os.path.join(work_dir, f"{sid}.wav")
+                    sf.write(short_path, short_audio, 16000)
+                    
+                    # 对短音频进行ASR转写
+                    short_transcription = self.transcribe_audio_with_timestamps(short_path, "Chinese")
+                    
+                    short_segment_info = {
+                        'sid': sid,
+                        'text': ''.join([item.text for item in short_transcription]) if short_transcription else text,
+                        'timestamps': [
+                            {
+                                'word': item.text,
+                                'start_time': float(item.start_time),
+                                'end_time': float(item.end_time)
+                            } for item in short_transcription
+                        ] if short_transcription else [],
+                        'original_text': text
+                    }
+                    
+                    result['transcriptions']['short_audios'].append(short_segment_info)
+                    short_audio_segments.append({
+                        'sid': sid,
+                        'timestamps': short_transcription,
+                        'text': short_segment_info['text']
+                    })
+                    
+                    # 保存原始短音频的ASR结果
+                    original_short_asr_entry = {
+                        'sid': sid,
+                        'asrText': text,
+                        'type': 'short_audio_original'
+                    }
+                    result['asr_results'].append(original_short_asr_entry)
+                    
+                    # 执行强制对齐（保持原有功能）
+                    try:
+                        alignment_results = self.aligner.align(
+                            audio=short_path,
+                            text=text,
+                            language="Chinese"
+                        )
+                        
+                        if alignment_results:
+                            alignment_data = alignment_results[0]
+                            
+                            # 质量评估
+                            quality_score = self.quality_assessment(
+                                short_audio, short_audio, alignment_data
+                            )
+                            
+                            alignment_info = {
+                                'sid': sid,
+                                'text': text,
+                                'audio_path': short_path,
+                                'alignment': [
+                                    {
+                                        'word': item.text,
+                                        'start_time': float(item.start_time),
+                                        'end_time': float(item.end_time)
+                                    } for item in alignment_data
+                                ],
+                                'quality_score': quality_score
+                            }
+                            
+                            result['alignments'].append(alignment_info)
+                            result['quality_scores'].append(quality_score)
+                            self.stats['successful_alignments'] += 1
+                        else:
+                            self.stats['failed_alignments'] += 1
+                            
+                    except Exception as e:
+                        logger.error(f"对齐失败 {sid}: {e}")
+                        self.stats['failed_alignments'] += 1
             
-            
-            # 新增：基于时间戳切分长音频
+            # 新增：基于时间戳切分长音频（即使没有短音频也会执行）
             segmentation_results = self.segment_long_audio_by_timestamps(
                 separated_path, short_audio_segments, work_dir, package_name
             )
             result['segmentations'] = segmentation_results
+            
+            # 保存切分后的音频ASR结果
+            for segmentation in segmentation_results:
+                if segmentation['status'] == 'success':
+                    segmented_asr_entry = {
+                        'sid': segmentation['sid'] + '_orig',  # 添加_orig后缀
+                        'asrText': segmentation['text'],
+                        'type': 'short_audio_segmented',
+                        'source_sid': segmentation['sid'],  # 原始SID
+                        'match_similarity': segmentation.get('similarity', 0),
+                        'match_score': segmentation.get('match_score', 0)
+                    }
+                    result['asr_results'].append(segmented_asr_entry)
+            
+            # 新增：生成asr.jsonl文件
+            self.generate_asr_jsonl(result['asr_results'], work_dir)
             
             result['status'] = 'completed'
             self.stats['transcription_success'] += 1
@@ -879,7 +957,42 @@ class AdvancedAudioProcessor:
             result['error'] = str(e)
         
         return result
-    
+
+    def generate_asr_jsonl(self, asr_results: List[Dict], output_dir: str):
+        """
+        生成ASR结果的jsonl文件
+        
+        Args:
+            asr_results: ASR结果列表
+            output_dir: 输出目录
+        """
+        if not asr_results:
+            logger.warning("没有ASR结果可保存")
+            return
+        
+        jsonl_path = os.path.join(output_dir, "asr.jsonl")
+        
+        try:
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                for result in asr_results:
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            
+            logger.info(f"ASR结果已保存到: {jsonl_path}")
+            logger.info(f"共保存 {len(asr_results)} 条记录")
+            
+            # 统计各类记录数量
+            type_counts = {}
+            for result in asr_results:
+                record_type = result.get('type', 'unknown')
+                type_counts[record_type] = type_counts.get(record_type, 0) + 1
+            
+            logger.info("ASR记录类型统计:")
+            for record_type, count in type_counts.items():
+                logger.info(f"  {record_type}: {count} 条")
+                
+        except Exception as e:
+            logger.error(f"保存ASR jsonl文件失败: {e}")
+
     def batch_process(self, 
                      data_directory: str, 
                      output_directory: str,
