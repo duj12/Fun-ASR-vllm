@@ -302,7 +302,7 @@ class AdvancedAudioProcessor:
                                        output_dir: str,
                                        package_name: str) -> List[Dict]:
         """
-        根据短音频的时间戳信息切分长音频
+        根据短音频的时间戳信息切分长音频（使用模糊匹配）
         
         Args:
             long_audio_path: 长音频文件路径
@@ -330,35 +330,33 @@ class AdvancedAudioProcessor:
                 logger.error("长音频转写失败，无法进行切分")
                 return segmentation_results
             
-            logger.info(f"长音频转写结果: {[item.text for item in long_timestamps]}")
+            long_audio_text = ''.join([item.text for item in long_timestamps])
+            logger.info(f"长音频转写结果: {long_audio_text}")
             
             # 为每个短音频段找到对应的时间范围
             for segment_info in short_audio_segments:
                 sid = segment_info['sid']
                 short_timestamps = segment_info['timestamps']
+                short_text = segment_info.get('text', '')
                 
-                if not short_timestamps:
-                    logger.warning(f"短音频 {sid} 无时间戳信息，跳过")
+                if not short_text.strip():
+                    logger.warning(f"短音频 {sid} 文本为空，跳过")
                     continue
                 
-                # 根据短音频的文字内容在长音频中定位
-                segment_words = [item.text for item in short_timestamps]
-                segment_text = ''.join(segment_words)
-                logger.info(f"处理短音频段 {sid}: {segment_text}")
+                logger.info(f"处理短音频段 {sid}: {short_text}")
                 
-                # 在长音频时间戳中寻找匹配的词序列
-                matched_ranges = self.find_word_sequence_in_timestamps(
-                    segment_words, long_timestamps
+                # 使用模糊匹配找到最佳位置
+                matches = self.fuzzy_text_matching(
+                    short_text, long_audio_text, long_timestamps
                 )
                 
-                if matched_ranges:
-                    # 合并时间范围
-                    start_time = min(range_info['start_time'] for range_info in matched_ranges)
-                    end_time = max(range_info['end_time'] for range_info in matched_ranges)
+                if matches:
+                    # 选择最佳匹配
+                    best_match = matches[0]
                     
                     # 转换为样本点
-                    start_sample = int(start_time * sample_rate)
-                    end_sample = int(end_time * sample_rate)
+                    start_sample = int(best_match['start_time'] * sample_rate)
+                    end_sample = int(best_match['end_time'] * sample_rate)
                     
                     # 边界检查
                     start_sample = max(0, start_sample)
@@ -377,26 +375,29 @@ class AdvancedAudioProcessor:
                         'original_sid': sid,
                         'output_file': output_filename,
                         'output_path': output_path,
-                        'start_time': start_time,
-                        'end_time': end_time,
+                        'start_time': best_match['start_time'],
+                        'end_time': best_match['end_time'],
                         'start_sample': start_sample,
                         'end_sample': end_sample,
-                        'duration': end_time - start_time,
-                        'text': segment_text,
-                        'matched_words': len(matched_ranges),
+                        'duration': best_match['end_time'] - best_match['start_time'],
+                        'text': short_text,
+                        'matched_text': best_match.get('matched_text', ''),
+                        'similarity': best_match.get('similarity', 0),
+                        'edit_distance': best_match.get('edit_distance', 0),
                         'status': 'success'
                     }
                     
                     segmentation_results.append(segmentation_result)
                     self.stats['segmentation_success'] += 1
-                    logger.info(f"成功切分 {sid}: {start_time:.2f}s - {end_time:.2f}s")
+                    logger.info(f"成功切分 {sid}: {best_match['start_time']:.2f}s - {best_match['end_time']:.2f}s")
+                    logger.info(f"匹配相似度: {best_match.get('similarity', 0):.3f}")
                 else:
-                    logger.warning(f"未能在长音频中找到匹配的词序列: {segment_text}")
+                    logger.warning(f"未能在长音频中找到匹配的文本: {short_text}")
                     segmentation_results.append({
                         'sid': sid,
                         'status': 'failed',
-                        'reason': 'word_sequence_not_found',
-                        'text': segment_text
+                        'reason': 'text_not_found',
+                        'text': short_text
                     })
             
         except Exception as e:
@@ -406,50 +407,317 @@ class AdvancedAudioProcessor:
 
     def find_word_sequence_in_timestamps(self, 
                                        target_words: List[str], 
-                                       timestamp_list: List) -> List[Dict]:
+                                       timestamp_list: List,
+                                       max_edit_distance_ratio: float = 0.3) -> List[Dict]:
         """
-        在时间戳列表中寻找目标词序列
+        在时间戳列表中寻找目标词序列（使用编辑距离优化匹配）
         
         Args:
             target_words: 目标词列表
             timestamp_list: 时间戳对象列表
+            max_edit_distance_ratio: 最大编辑距离比例阈值
             
         Returns:
             List[Dict]: 匹配的时间范围信息
         """
+        if not target_words or not timestamp_list:
+            return []
+        
         matched_ranges = []
         timestamp_words = [item.text for item in timestamp_list]
         
-        # 简单的滑动窗口匹配
-        target_len = len(target_words)
-        timestamp_len = len(timestamp_words)
+        target_text = ''.join(target_words)
+        target_len = len(target_text)
         
-        for i in range(timestamp_len - target_len + 1):
-            # 检查当前窗口是否匹配
-            window_matches = True
-            for j in range(target_len):
-                if timestamp_words[i + j] != target_words[j]:
-                    window_matches = False
-                    break
+        if target_len == 0:
+            return []
+        
+        logger.info(f"寻找匹配文本: '{target_text}' (长度: {target_len})")
+        logger.info(f"长音频文本: '{''.join(timestamp_words)}'")
+        
+        best_matches = []
+        
+        # 滑动窗口搜索最佳匹配
+        window_size = max(1, target_len - 2)  # 最小窗口大小
+        max_window_size = min(len(''.join(timestamp_words)), target_len + 10)  # 最大窗口大小
+        
+        for window_size in range(window_size, max_window_size + 1):
+            for start_idx in range(len(timestamp_words)):
+                # 构建候选文本段
+                candidate_words = []
+                candidate_indices = []
+                current_length = 0
+                
+                # 从起始位置收集足够的字符
+                for i in range(start_idx, len(timestamp_words)):
+                    word = timestamp_words[i]
+                    if current_length + len(word) <= window_size:
+                        candidate_words.append(word)
+                        candidate_indices.append(i)
+                        current_length += len(word)
+                    else:
+                        break
+                
+                if not candidate_words:
+                    continue
+                
+                candidate_text = ''.join(candidate_words)
+                
+                # 计算编辑距离
+                edit_distance = self.calculate_edit_distance(target_text, candidate_text)
+                edit_ratio = edit_distance / max(len(target_text), len(candidate_text))
+                
+                # 记录较好的匹配
+                if edit_ratio <= max_edit_distance_ratio:
+                    match_info = {
+                        'start_index': candidate_indices[0],
+                        'end_index': candidate_indices[-1],
+                        'candidate_text': candidate_text,
+                        'target_text': target_text,
+                        'edit_distance': edit_distance,
+                        'edit_ratio': edit_ratio,
+                        'score': 1.0 - edit_ratio  # 得分越高越好
+                    }
+                    best_matches.append(match_info)
+                    
+                    logger.debug(f"候选匹配: '{candidate_text}' vs '{target_text}', "
+                               f"编辑距离: {edit_distance}, 比例: {edit_ratio:.3f}")
+        
+        # 如果没有找到匹配，尝试更宽松的条件
+        if not best_matches and max_edit_distance_ratio < 0.5:
+            logger.info("未找到严格匹配，尝试更宽松的匹配条件...")
+            return self.find_word_sequence_in_timestamps(
+                target_words, timestamp_list, max_edit_distance_ratio=0.5
+            )
+        
+        # 按得分排序，选择最好的匹配
+        if best_matches:
+            best_matches.sort(key=lambda x: x['score'], reverse=True)
+            best_match = best_matches[0]
             
-            if window_matches:
-                # 找到匹配，记录时间范围
-                start_idx = i
-                end_idx = i + target_len - 1
-                
-                range_info = {
-                    'start_time': timestamp_list[start_idx].start_time,
-                    'end_time': timestamp_list[end_idx].end_time,
-                    'words': target_words,
-                    'start_index': start_idx,
-                    'end_index': end_idx
-                }
-                matched_ranges.append(range_info)
-                
-                # 如果只需要第一个匹配，可以在这里break
-                # break
+            logger.info(f"最佳匹配: '{best_match['candidate_text']}' vs '{best_match['target_text']}'")
+            logger.info(f"编辑距离: {best_match['edit_distance']}, 得分: {best_match['score']:.3f}")
+            
+            # 构建返回的时间范围信息
+            range_info = {
+                'start_time': timestamp_list[best_match['start_index']].start_time,
+                'end_time': timestamp_list[best_match['end_index']].end_time,
+                'words': timestamp_words[best_match['start_index']:best_match['end_index']+1],
+                'start_index': best_match['start_index'],
+                'end_index': best_match['end_index'],
+                'match_score': best_match['score'],
+                'edit_distance': best_match['edit_distance'],
+                'edit_ratio': best_match['edit_ratio']
+            }
+            matched_ranges.append(range_info)
+            
+            # 如果还有其他高质量匹配，也可以考虑
+            for match in best_matches[1:]:
+                if match['score'] >= best_match['score'] * 0.8:  # 至少80%的得分
+                    additional_range = {
+                        'start_time': timestamp_list[match['start_index']].start_time,
+                        'end_time': timestamp_list[match['end_index']].end_time,
+                        'words': timestamp_words[match['start_index']:match['end_index']+1],
+                        'start_index': match['start_index'],
+                        'end_index': match['end_index'],
+                        'match_score': match['score'],
+                        'edit_distance': match['edit_distance'],
+                        'edit_ratio': match['edit_ratio']
+                    }
+                    matched_ranges.append(additional_range)
+        else:
+            logger.warning(f"未找到合适的匹配: 目标文本='{target_text}'")
         
         return matched_ranges
+
+    def calculate_edit_distance(self, s1: str, s2: str) -> int:
+        """
+        计算两个字符串之间的编辑距离（Levenshtein距离）
+        
+        Args:
+            s1: 第一个字符串
+            s2: 第二个字符串
+            
+        Returns:
+            int: 编辑距离
+        """
+        if len(s1) < len(s2):
+            return self.calculate_edit_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        # 初始化距离矩阵
+        previous_row = list(range(len(s2) + 1))
+        
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+
+    def fuzzy_text_matching(self, 
+                          target_text: str, 
+                          source_text: str,
+                          timestamp_list: List) -> List[Dict]:
+        """
+        模糊文本匹配，用于处理不完全匹配的情况
+        
+        Args:
+            target_text: 目标文本（短音频文本）
+            source_text: 源文本（长音频文本）
+            timestamp_list: 长音频的时间戳列表
+            
+        Returns:
+            List[Dict]: 匹配的位置信息
+        """
+        if not target_text or not source_text:
+            return []
+        
+        # 清理文本（去除标点符号和空格）
+        def clean_text(text):
+            import re
+            # 保留中文字符和数字
+            cleaned = re.sub(r'[^\u4e00-\u9fff0-9]', '', text)
+            return cleaned
+        
+        clean_target = clean_text(target_text)
+        clean_source = clean_text(source_text)
+        
+        logger.info(f"清理后文本对比:")
+        logger.info(f"  目标: '{clean_target}'")
+        logger.info(f"  源文本: '{clean_source}'")
+        
+        if not clean_target or not clean_source:
+            return []
+        
+        # 寻找最长公共子序列的位置
+        matches = self.find_common_subsequences(clean_target, clean_source, timestamp_list)
+        
+        # 如果没有找到足够长的匹配，使用滑动窗口方法
+        if not matches or max(match['length'] for match in matches) < len(clean_target) * 0.5:
+            matches = self.sliding_window_matching(clean_target, clean_source, timestamp_list)
+        
+        return matches
+
+    def find_common_subsequences(self, target: str, source: str, timestamp_list: List) -> List[Dict]:
+        """
+        寻找最长公共子序列及其在源文本中的位置
+        """
+        matches = []
+        
+        # 简化的匹配算法：寻找目标文本在源文本中的近似位置
+        target_len = len(target)
+        source_len = len(source)
+        
+        # 滑动窗口匹配
+        best_positions = []
+        window_size = max(1, target_len - 2)
+        
+        for i in range(source_len - window_size + 1):
+            window = source[i:i + window_size]
+            similarity = self.calculate_similarity(target, window)
+            
+            if similarity > 0.6:  # 相似度阈值
+                # 找到对应的timestamp位置
+                start_pos = self.find_timestamp_position(i, source, timestamp_list)
+                end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
+                
+                if start_pos is not None and end_pos is not None:
+                    match_info = {
+                        'start_time': timestamp_list[start_pos].start_time,
+                        'end_time': timestamp_list[end_pos].end_time,
+                        'similarity': similarity,
+                        'matched_text': window,
+                        'target_text': target,
+                        'length': window_size
+                    }
+                    matches.append(match_info)
+        
+        return matches
+
+    def sliding_window_matching(self, target: str, source: str, timestamp_list: List) -> List[Dict]:
+        """
+        滑动窗口匹配算法
+        """
+        matches = []
+        target_len = len(target)
+        
+        # 尝试不同的窗口大小
+        for window_size in range(max(1, target_len - 3), min(len(source), target_len + 3) + 1):
+            for i in range(len(source) - window_size + 1):
+                window = source[i:i + window_size]
+                edit_dist = self.calculate_edit_distance(target, window)
+                similarity = 1 - (edit_dist / max(len(target), len(window)))
+                
+                if similarity > 0.5:  # 相似度阈值
+                    start_pos = self.find_timestamp_position(i, source, timestamp_list)
+                    end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
+                    
+                    if start_pos is not None and end_pos is not None:
+                        match_info = {
+                            'start_time': timestamp_list[start_pos].start_time,
+                            'end_time': timestamp_list[end_pos].end_time,
+                            'similarity': similarity,
+                            'edit_distance': edit_dist,
+                            'matched_text': window,
+                            'target_text': target,
+                            'length': window_size
+                        }
+                        matches.append(match_info)
+        
+        # 按相似度排序
+        matches.sort(key=lambda x: x['similarity'], reverse=True)
+        return matches[:3]  # 返回前3个最佳匹配
+
+    def calculate_similarity(self, s1: str, s2: str) -> float:
+        """
+        计算两个字符串的相似度
+        """
+        if not s1 or not s2:
+            return 0.0
+        
+        # 使用编辑距离计算相似度
+        edit_dist = self.calculate_edit_distance(s1, s2)
+        max_len = max(len(s1), len(s2))
+        similarity = 1 - (edit_dist / max_len) if max_len > 0 else 0
+        
+        return similarity
+
+    def find_timestamp_position(self, char_position: int, full_text: str, timestamp_list: List) -> Optional[int]:
+        """
+        根据字符位置找到对应的时间戳索引
+        """
+        if not timestamp_list or char_position < 0:
+            return None
+        
+        # 构建字符到时间戳的映射
+        char_to_timestamp = {}
+        current_pos = 0
+        
+        for idx, item in enumerate(timestamp_list):
+            word = item.text
+            for char in word:
+                char_to_timestamp[current_pos] = idx
+                current_pos += 1
+        
+        # 找到最接近的位置
+        if char_position in char_to_timestamp:
+            return char_to_timestamp[char_position]
+        elif char_position < len(char_to_timestamp):
+            # 找到最近的时间戳
+            positions = sorted(char_to_timestamp.keys())
+            for pos in positions:
+                if pos >= char_position:
+                    return char_to_timestamp[pos]
+            return char_to_timestamp[positions[-1]]
+        else:
+            return len(timestamp_list) - 1
 
     def process_audio_package(self, 
                             package_path: str, 
