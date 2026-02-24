@@ -654,7 +654,7 @@ class AdvancedAudioProcessor:
             window = source[i:i + window_size]
             similarity = self.calculate_similarity(target, window)
             
-            if similarity > 0.5:  # 相似度阈值
+            if similarity > 0.6:  # 相似度阈值
                 # 找到对应的timestamp位置
                 start_pos = self.find_timestamp_position(i, source, timestamp_list)
                 end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
@@ -693,7 +693,7 @@ class AdvancedAudioProcessor:
                 similarity = 1 - (edit_dist / max(len(target), len(window)))
                 
                 # 使用传入的阈值参数
-                if similarity > (1 - max_edit_distance_ratio):  # 相似度阈值
+                if similarity > 0.5:  # 相似度阈值
                     start_pos = self.find_timestamp_position(i, source, timestamp_list)
                     end_pos = self.find_timestamp_position(i + window_size, source, timestamp_list)
                     
