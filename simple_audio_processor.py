@@ -71,7 +71,8 @@ class SimpleAudioProcessor:
             'processed_audios': 0,
             'successful_transcriptions': 0,
             'failed_transcriptions': 0,
-            'vad_segments': 0
+            'vad_segments': 0,
+            'empty_folders_removed': 0
         }
     
     def load_pcm_audio(self, pcm_path: str) -> np.ndarray:
@@ -92,7 +93,20 @@ class SimpleAudioProcessor:
         except Exception as e:
             logger.error(f"加载PCM文件失败 {pcm_path}: {e}")
             raise
-    
+            
+    def get_audio_duration(self, audio_data: np.ndarray, sample_rate: int = 16000) -> float:
+        """
+        计算音频时长（秒）
+        
+        Args:
+            audio_data: 音频数据
+            sample_rate: 采样率
+            
+        Returns:
+            float: 音频时长（秒）
+        """
+        return len(audio_data) / sample_rate
+
     def vad_segmentation(self, audio_data: np.ndarray, sample_rate: int = 16000) -> List[Dict]:
         """
         使用fsmnvad进行音频切分
@@ -145,8 +159,8 @@ class SimpleAudioProcessor:
         
         Args:
             audio_data: 原始音频数据
-            start_time: 开始时间(ms)
-            end_time: 结束时间(ms)
+            start_time: 开始时间(毫秒)
+            end_time: 结束时间(毫秒)
             sample_rate: 采样率
             
         Returns:
@@ -194,9 +208,85 @@ class SimpleAudioProcessor:
             self.stats['failed_transcriptions'] += 1
             return ""
     
+    def is_folder_empty(self, folder_path: str) -> bool:
+        """
+        检查文件夹是否为空（不包含WAV文件）
+        
+        Args:
+            folder_path: 文件夹路径
+            
+        Returns:
+            bool: 是否为空
+        """
+        wav_files = list(Path(folder_path).glob("*.wav"))
+        return len(wav_files) == 0
+    
+    def remove_empty_folder(self, folder_path: str) -> bool:
+        """
+        删除空文件夹
+        
+        Args:
+            folder_path: 文件夹路径
+            
+        Returns:
+            bool: 是否成功删除
+        """
+        try:
+            if os.path.exists(folder_path) and os.path.isdir(folder_path):
+                # 检查是否真的为空（只有文件夹本身，没有WAV文件）
+                if self.is_folder_empty(folder_path):
+                    os.rmdir(folder_path)
+                    logger.info(f"已删除空文件夹: {folder_path}")
+                    self.stats['empty_folders_removed'] += 1
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"删除文件夹失败 {folder_path}: {e}")
+            return False
+    
+    def save_folder_results_to_jsonl(self, results: List[Dict], folder_path: str, package_name: str):
+        """
+        将单个文件夹的转写结果保存为jsonl文件
+        
+        Args:
+            results: 转写结果列表
+            folder_path: 文件夹路径
+            package_name: 包名
+        """
+        try:
+            jsonl_path = os.path.join(folder_path, f"{package_name}_results.jsonl")
+            
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                for result in results:
+                    # 构造jsonl记录
+                    record = {
+                        'audio_name': result['audio_name'],
+                        'transcription': result['transcription'],
+                        'audio_type': result['audio_type'],
+                        'duration': result.get('duration', 0)  # 添加时长信息
+                    }
+                    
+                    # 如果是VAD切分的音频，添加时间段信息
+                    if result['audio_type'] == 'vad_segment' and 'segment_info' in result:
+                        segment_info = result['segment_info']
+                        record['segment_info'] = {
+                            'segment_id': segment_info['segment_id'],
+                            'start_time': segment_info['start_time'],
+                            'end_time': segment_info['end_time'],
+                            'duration': segment_info['duration']
+                        }
+                    
+                    f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            
+            logger.info(f"文件夹结果已保存到: {jsonl_path}")
+            logger.info(f"共保存 {len(results)} 条记录")
+            
+        except Exception as e:
+            logger.error(f"保存文件夹jsonl文件失败: {e}")
+    
     def process_single_audio_package(self, 
                                    package_path: str, 
-                                   output_base_dir: str) -> List[Dict]:
+                                   output_base_dir: str) -> tuple[List[Dict], str]:
         """
         处理单个音频包
         
@@ -205,13 +295,14 @@ class SimpleAudioProcessor:
             output_base_dir: 输出基础目录
             
         Returns:
-            List[Dict]: 转写结果列表
+            tuple[List[Dict], str]: (转写结果列表, 处理后的文件夹路径)
         """
         package_name = Path(package_path).stem
         work_dir = os.path.join(output_base_dir, package_name)
         os.makedirs(work_dir, exist_ok=True)
         
         transcription_results = []
+        folder_path = work_dir  # 保存文件夹路径用于后续处理
         
         try:
             # 解压文件
@@ -255,19 +346,24 @@ class SimpleAudioProcessor:
                     segment['end_time']
                 )
                 
-                # 保存切分后的音频
-                segment_filename = f"{package_name}_seg_{segment['segment_id']}.wav"
+                # 保存切分后的音频（四位数编号，从0001开始）
+                segment_number = segment['segment_id'] + 1  # 从1开始
+                segment_filename = f"{package_name}_{segment_number:04d}.wav"
                 segment_path = os.path.join(work_dir, segment_filename)
                 sf.write(segment_path, audio_segment, 16000)
                 
                 # 转写切分后的音频
                 transcription = self.transcribe_audio(segment_path, "Chinese")
                 
+                # 计算音频时长
+                duration = self.get_audio_duration(audio_segment)
+                
                 # 记录结果
                 result_entry = {
                     'audio_name': segment_filename,
                     'transcription': transcription,
                     'audio_type': 'vad_segment',
+                    'duration': duration,  # 添加时长信息（秒）
                     'segment_info': {
                         'segment_id': segment['segment_id'],
                         'start_time': segment['start_time'],
@@ -296,11 +392,15 @@ class SimpleAudioProcessor:
                 # 转写短音频
                 transcription = self.transcribe_audio(short_wav_path, "Chinese")
                 
-                # 记录结果
+                # 计算短音频时长
+                short_duration = self.get_audio_duration(short_audio_data)
+                
+                # 记录结果（添加时长信息）
                 result_entry = {
                     'audio_name': f"{sid}.wav",
                     'transcription': transcription,
-                    'audio_type': 'short_audio'
+                    'audio_type': 'short_audio',
+                    'duration': short_duration  # 添加时长信息（秒）
                 }
                 transcription_results.append(result_entry)
                 
@@ -309,12 +409,16 @@ class SimpleAudioProcessor:
             # 清理解压的PCM文件
             self.cleanup_pcm_files(work_dir)
             
+            # 保存当前文件夹的结果到jsonl
+            if transcription_results:  # 只有当有结果时才保存
+                self.save_folder_results_to_jsonl(transcription_results, work_dir, package_name)
+            
             logger.info(f"包 {package_name} 处理完成，共处理 {len(transcription_results)} 个音频文件")
             
         except Exception as e:
             logger.error(f"处理包失败 {package_path}: {e}")
             
-        return transcription_results
+        return transcription_results, folder_path
     
     def cleanup_pcm_files(self, work_dir: str):
         """
@@ -356,15 +460,16 @@ class SimpleAudioProcessor:
                 entry = {
                     '音频名称': result['audio_name'],
                     '转写结果': result['transcription'],
-                    '音频类型': result['audio_type']
+                    '音频类型': result['audio_type'],
+                    '时长(秒)': result.get('duration', 0)  # 添加时长列
                 }
                 
                 # 如果是VAD切分的音频，添加时间段信息
                 if result['audio_type'] == 'vad_segment' and 'segment_info' in result:
                     segment_info = result['segment_info']
-                    entry['开始时间(秒)'] = segment_info['start_time']
-                    entry['结束时间(秒)'] = segment_info['end_time']
-                    entry['持续时间(秒)'] = segment_info['duration']
+                    entry['开始时间(秒)'] = segment_info['start_time']/1000.0
+                    entry['结束时间(秒)'] = segment_info['end_time']/1000.0
+                    entry['持续时间(秒)'] = segment_info['duration']/1000.0
                 
                 excel_data.append(entry)
             
@@ -381,7 +486,8 @@ class SimpleAudioProcessor:
     def batch_process(self, 
                      data_directory: str, 
                      output_directory: str,
-                     show_progress: bool = True) -> List[Dict]:
+                     show_progress: bool = True,
+                     remove_empty_folders: bool = True) -> List[Dict]:
         """
         批量处理所有音频包
         
@@ -389,6 +495,7 @@ class SimpleAudioProcessor:
             data_directory: 数据目录
             output_directory: 输出目录
             show_progress: 是否显示进度
+            remove_empty_folders: 是否删除空文件夹
             
         Returns:
             List[Dict]: 所有转写结果
@@ -398,14 +505,16 @@ class SimpleAudioProcessor:
         
         self.stats['total_packages'] = len(zip_files)
         all_results = []
+        processed_folders = []  # 记录处理过的文件夹路径
         
         from tqdm import tqdm
         iterator = tqdm(zip_files, desc="处理音频包") if show_progress else zip_files
         
         for zip_file in iterator:
             logger.info(f"处理: {zip_file.name}")
-            package_results = self.process_single_audio_package(str(zip_file), output_directory)
+            package_results, folder_path = self.process_single_audio_package(str(zip_file), output_directory)
             all_results.extend(package_results)
+            processed_folders.append((folder_path, len(package_results)))  # 保存文件夹路径和结果数量
             
             if show_progress:
                 processed = self.stats['processed_audios']
@@ -416,6 +525,13 @@ class SimpleAudioProcessor:
                     '成功': successful,
                     '失败': failed
                 })
+        
+        # 处理空文件夹清理
+        if remove_empty_folders:
+            logger.info("开始检查并清理空文件夹...")
+            for folder_path, result_count in processed_folders:
+                if result_count == 0:  # 如果该文件夹没有任何处理结果
+                    self.remove_empty_folder(folder_path)
         
         # 生成汇总报告
         self.generate_summary_report(all_results, output_directory)
@@ -437,6 +553,7 @@ class SimpleAudioProcessor:
                 'successful_transcriptions': self.stats['successful_transcriptions'],
                 'failed_transcriptions': self.stats['failed_transcriptions'],
                 'vad_segments': self.stats['vad_segments'],
+                'empty_folders_removed': self.stats['empty_folders_removed'],
                 'success_rate': (
                     self.stats['successful_transcriptions'] / 
                     (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) 
@@ -470,6 +587,7 @@ def main():
     parser.add_argument("--device", default="cuda:0", help="计算设备")
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="数据类型")
     parser.add_argument("--no_progress", action="store_true", help="禁用进度显示")
+    parser.add_argument("--keep_empty", action="store_true", help="保留空文件夹（不清除）")
     
     args = parser.parse_args()
     
@@ -486,7 +604,8 @@ def main():
     results = processor.batch_process(
         data_directory=args.data_dir,
         output_directory=args.output_dir,
-        show_progress=not args.no_progress
+        show_progress=not args.no_progress,
+        remove_empty_folders=not args.keep_empty
     )
     
     # 保存结果到Excel
@@ -495,6 +614,8 @@ def main():
     
     logger.info("批量处理完成!")
     logger.info(f"Excel结果文件: {excel_path}")
+    if not args.keep_empty:
+        logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
 
 
 if __name__ == "__main__":
