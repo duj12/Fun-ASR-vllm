@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 import re
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 from qwen_asr import Qwen3ASRModel
@@ -481,7 +482,10 @@ class SimpleAudioProcessor:
             'vad_segments': 0,
             'empty_folders_removed': 0,
             'filtered_results': 0,  # 新增：筛选掉的结果数
-            'final_results': 0      # 新增：最终保留的结果数
+            'final_results': 0,     # 新增：最终保留的结果数
+            'original_total_duration': 0.0,  # 原始长音频总时长
+            'final_total_duration': 0.0,     # 最终保留音频总时长
+            'effective_ratio': 0.0           # 有效数据比例
         }
     
     def load_pcm_audio(self, pcm_path: str) -> np.ndarray:
@@ -718,7 +722,7 @@ class SimpleAudioProcessor:
                     with zip_ref.open(member) as source, open(target_path, 'wb') as target:
                         target.write(source.read())
             
-            # 查找长音频文件
+            # 查找长音频文件并统计原始时长
             long_audio_file = Path(work_dir) / f"{package_name}.pcm"
             
             if not long_audio_file.exists():
@@ -728,6 +732,11 @@ class SimpleAudioProcessor:
                     logger.warning(f"使用第一个PCM文件: {long_audio_file.name}")
                 else:
                     raise ValueError("未找到PCM音频文件")
+            
+            # 统计原始长音频时长
+            original_duration = self._get_pcm_duration(str(long_audio_file))
+            self.stats['original_total_duration'] += original_duration
+            logger.info(f"原始长音频时长: {original_duration:.2f} 秒")
             
             # 加载长音频
             long_audio_data = self.load_pcm_audio(str(long_audio_file))
@@ -764,6 +773,7 @@ class SimpleAudioProcessor:
                     'audio_type': 'vad_segment',
                     'duration': duration,  # 添加时长信息（秒）
                     'audio_path': segment_path,  # 添加音频路径用于后续删除
+                    'original_source': package_name,  # 添加原始来源信息
                     'segment_info': {
                         'segment_id': segment['segment_id'],
                         'start_time': segment['start_time'],
@@ -801,7 +811,8 @@ class SimpleAudioProcessor:
                     'transcription': transcription,
                     'audio_type': 'short_audio',
                     'duration': short_duration,  # 添加时长信息（秒）
-                    'audio_path': short_wav_path  # 添加音频路径用于后续删除
+                    'audio_path': short_wav_path,  # 添加音频路径用于后续删除
+                    'original_source': package_name   # 添加原始来源信息
                 }
                 transcription_results.append(result_entry)
                 
@@ -814,7 +825,13 @@ class SimpleAudioProcessor:
                 filtered_count = original_count - len(transcription_results)
                 self.stats['filtered_results'] += filtered_count
                 self.stats['final_results'] += len(transcription_results)
+                
+                # 统计保留音频的总时长
+                retained_duration = sum(result['duration'] for result in transcription_results)
+                self.stats['final_total_duration'] += retained_duration
+                
                 logger.info(f"筛选完成: 原始{original_count}条 -> 最终{len(transcription_results)}条")
+                logger.info(f"保留音频总时长: {retained_duration:.2f} 秒")
             
             # 清理解压的PCM文件
             self.cleanup_pcm_files(work_dir)
@@ -829,6 +846,187 @@ class SimpleAudioProcessor:
             logger.error(f"处理包失败 {package_path}: {e}")
             
         return transcription_results, folder_path
+    
+    def _get_pcm_duration(self, pcm_path: str, sample_rate: int = 16000) -> float:
+        """
+        获取PCM文件的时长
+        
+        Args:
+            pcm_path: PCM文件路径
+            sample_rate: 采样率
+            
+        Returns:
+            float: 音频时长（秒）
+        """
+        try:
+            file_size = os.path.getsize(pcm_path)
+            # PCM文件每个样本2字节（int16）
+            total_samples = file_size // 2
+            duration = total_samples / sample_rate
+            return duration
+        except Exception as e:
+            logger.warning(f"获取PCM文件时长失败 {pcm_path}: {e}")
+            return 0.0
+    
+    def consolidate_audio_files(self, results: List[Dict], output_dir: str) -> str:
+        """
+        将所有保留的音频文件移动到统一的文件夹中
+        
+        Args:
+            results: 处理结果列表
+            output_dir: 输出目录
+            
+        Returns:
+            str: 统一音频文件夹路径
+        """
+        consolidated_dir = os.path.join(output_dir, "audio")
+        os.makedirs(consolidated_dir, exist_ok=True)
+        
+        logger.info(f"开始整理音频文件到: {consolidated_dir}")
+        moved_count = 0
+        
+        for result in results:
+            if 'audio_path' in result and os.path.exists(result['audio_path']):
+                source_path = result['audio_path']
+                filename = os.path.basename(source_path)
+                target_path = os.path.join(consolidated_dir, filename)
+                
+                try:
+                    # 复制文件而不是移动，保留原始文件
+                    shutil.copy2(source_path, target_path)
+                    moved_count += 1
+                    logger.debug(f"已复制: {filename}")
+                except Exception as e:
+                    logger.warning(f"复制文件失败 {filename}: {e}")
+        
+        logger.info(f"音频文件整理完成，共复制 {moved_count} 个文件")
+        return consolidated_dir
+    
+    def calculate_effective_ratio(self):
+        """计算有效数据比例"""
+        if self.stats['original_total_duration'] > 0:
+            self.stats['effective_ratio'] = (
+                self.stats['final_total_duration'] / self.stats['original_total_duration']
+            )
+        else:
+            self.stats['effective_ratio'] = 0.0
+    
+    def generate_summary_report(self, results: List[Dict], output_dir: str):
+        """
+        生成处理汇总报告
+        
+        Args:
+            results: 处理结果
+            output_dir: 输出目录
+        """
+        # 计算有效数据比例
+        self.calculate_effective_ratio()
+        
+        report = {
+            'summary': {
+                'total_packages': self.stats['total_packages'],
+                'total_processed_audios': self.stats['processed_audios'],
+                'successful_transcriptions': self.stats['successful_transcriptions'],
+                'failed_transcriptions': self.stats['failed_transcriptions'],
+                'vad_segments': self.stats['vad_segments'],
+                'empty_folders_removed': self.stats['empty_folders_removed'],
+                'filtered_results': self.stats.get('filtered_results', 0),
+                'final_results': self.stats.get('final_results', 0),
+                'original_total_duration': round(self.stats['original_total_duration'], 2),
+                'final_total_duration': round(self.stats['final_total_duration'], 2),
+                'effective_ratio': round(self.stats['effective_ratio'], 4),
+                'success_rate': (
+                    self.stats['successful_transcriptions'] / 
+                    (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) 
+                    if (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) > 0 
+                    else 0
+                )
+            },
+            'type_statistics': {},
+            'duration_statistics': {
+                '原始长音频总时长(秒)': round(self.stats['original_total_duration'], 2),
+                '最终保留音频总时长(秒)': round(self.stats['final_total_duration'], 2),
+                '有效数据比例': f"{self.stats['effective_ratio']*100:.2f}%"
+            },
+            'sample_results': results[:5]  # 显示前5个结果作为示例
+        }
+        
+        # 统计各类型音频数量
+        for result in results:
+            audio_type = result['audio_type']
+            report['type_statistics'][audio_type] = report['type_statistics'].get(audio_type, 0) + 1
+        
+        # 保存报告
+        report_path = os.path.join(output_dir, "processing_summary.json")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"处理汇总报告已保存: {report_path}")
+        logger.info(f"原始总时长: {self.stats['original_total_duration']:.2f} 秒")
+        logger.info(f"保留总时长: {self.stats['final_total_duration']:.2f} 秒")
+        logger.info(f"有效数据比例: {self.stats['effective_ratio']*100:.2f}%")
+
+    def batch_process(self, 
+                     data_directory: str, 
+                     output_directory: str,
+                     show_progress: bool = True,
+                     remove_empty_folders: bool = True,
+                     consolidate_audio: bool = True) -> List[Dict]:
+        """
+        批量处理所有音频包
+        
+        Args:
+            data_directory: 数据目录
+            output_directory: 输出目录
+            show_progress: 是否显示进度
+            remove_empty_folders: 是否删除空文件夹
+            consolidate_audio: 是否整理音频文件到统一文件夹
+            
+        Returns:
+            List[Dict]: 所有转写结果
+        """
+        zip_files = list(Path(data_directory).glob("*.zip"))
+        logger.info(f"发现 {len(zip_files)} 个压缩包")
+        
+        self.stats['total_packages'] = len(zip_files)
+        all_results = []
+        processed_folders = []  # 记录处理过的文件夹路径
+        
+        from tqdm import tqdm
+        iterator = tqdm(zip_files, desc="处理音频包") if show_progress else zip_files
+        
+        for zip_file in iterator:
+            logger.info(f"处理: {zip_file.name}")
+            package_results, folder_path = self.process_single_audio_package(str(zip_file), output_directory)
+            all_results.extend(package_results)
+            processed_folders.append((folder_path, len(package_results)))  # 保存文件夹路径和结果数量
+            
+            if show_progress:
+                processed = self.stats['processed_audios']
+                successful = self.stats['successful_transcriptions']
+                failed = self.stats['failed_transcriptions']
+                iterator.set_postfix({
+                    '已处理': processed,
+                    '成功': successful,
+                    '失败': failed
+                })
+        
+        # 处理空文件夹清理
+        if remove_empty_folders:
+            logger.info("开始检查并清理空文件夹...")
+            for folder_path, result_count in processed_folders:
+                if result_count == 0:  # 如果该文件夹没有任何处理结果
+                    self.remove_empty_folder(folder_path)
+        
+        # 整理音频文件到统一文件夹
+        if consolidate_audio and all_results:
+            consolidated_dir = self.consolidate_audio_files(all_results, output_directory)
+            logger.info(f"所有音频文件已整理到: {consolidated_dir}")
+        
+        # 生成汇总报告
+        self.generate_summary_report(all_results, output_directory)
+        
+        return all_results
     
     def cleanup_pcm_files(self, work_dir: str):
         """
@@ -892,102 +1090,6 @@ class SimpleAudioProcessor:
             
         except Exception as e:
             logger.error(f"保存Excel文件失败: {e}")
-    
-    def batch_process(self, 
-                     data_directory: str, 
-                     output_directory: str,
-                     show_progress: bool = True,
-                     remove_empty_folders: bool = True) -> List[Dict]:
-        """
-        批量处理所有音频包
-        
-        Args:
-            data_directory: 数据目录
-            output_directory: 输出目录
-            show_progress: 是否显示进度
-            remove_empty_folders: 是否删除空文件夹
-            
-        Returns:
-            List[Dict]: 所有转写结果
-        """
-        zip_files = list(Path(data_directory).glob("*.zip"))
-        logger.info(f"发现 {len(zip_files)} 个压缩包")
-        
-        self.stats['total_packages'] = len(zip_files)
-        all_results = []
-        processed_folders = []  # 记录处理过的文件夹路径
-        
-        from tqdm import tqdm
-        iterator = tqdm(zip_files, desc="处理音频包") if show_progress else zip_files
-        
-        for zip_file in iterator:
-            logger.info(f"处理: {zip_file.name}")
-            package_results, folder_path = self.process_single_audio_package(str(zip_file), output_directory)
-            all_results.extend(package_results)
-            processed_folders.append((folder_path, len(package_results)))  # 保存文件夹路径和结果数量
-            
-            if show_progress:
-                processed = self.stats['processed_audios']
-                successful = self.stats['successful_transcriptions']
-                failed = self.stats['failed_transcriptions']
-                iterator.set_postfix({
-                    '已处理': processed,
-                    '成功': successful,
-                    '失败': failed
-                })
-        
-        # 处理空文件夹清理
-        if remove_empty_folders:
-            logger.info("开始检查并清理空文件夹...")
-            for folder_path, result_count in processed_folders:
-                if result_count == 0:  # 如果该文件夹没有任何处理结果
-                    self.remove_empty_folder(folder_path)
-        
-        # 生成汇总报告
-        self.generate_summary_report(all_results, output_directory)
-        
-        return all_results
-    
-    def generate_summary_report(self, results: List[Dict], output_dir: str):
-        """
-        生成处理汇总报告
-        
-        Args:
-            results: 处理结果
-            output_dir: 输出目录
-        """
-        report = {
-            'summary': {
-                'total_packages': self.stats['total_packages'],
-                'total_processed_audios': self.stats['processed_audios'],
-                'successful_transcriptions': self.stats['successful_transcriptions'],
-                'failed_transcriptions': self.stats['failed_transcriptions'],
-                'vad_segments': self.stats['vad_segments'],
-                'empty_folders_removed': self.stats['empty_folders_removed'],
-                'filtered_results': self.stats.get('filtered_results', 0),
-                'final_results': self.stats.get('final_results', 0),
-                'success_rate': (
-                    self.stats['successful_transcriptions'] / 
-                    (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) 
-                    if (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) > 0 
-                    else 0
-                )
-            },
-            'type_statistics': {},
-            'sample_results': results[:5]  # 显示前5个结果作为示例
-        }
-        
-        # 统计各类型音频数量
-        for result in results:
-            audio_type = result['audio_type']
-            report['type_statistics'][audio_type] = report['type_statistics'].get(audio_type, 0) + 1
-        
-        # 保存报告
-        report_path = os.path.join(output_dir, "processing_summary.json")
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"处理汇总报告已保存: {report_path}")
 
 
 def main():
@@ -1002,6 +1104,7 @@ def main():
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="数据类型")
     parser.add_argument("--no_progress", action="store_true", help="禁用进度显示")
     parser.add_argument("--keep_empty", action="store_true", help="保留空文件夹（不清除）")
+    parser.add_argument("--no_consolidate", action="store_true", help="不整理音频文件到统一文件夹")
     
     # 筛选相关参数
     parser.add_argument("--disable_filter", action="store_true", help="禁用音频筛选功能")
@@ -1033,7 +1136,8 @@ def main():
         data_directory=args.data_dir,
         output_directory=args.output_dir,
         show_progress=not args.no_progress,
-        remove_empty_folders=not args.keep_empty
+        remove_empty_folders=not args.keep_empty,
+        consolidate_audio=not args.no_consolidate
     )
     
     # 保存结果到Excel
@@ -1044,11 +1148,18 @@ def main():
     logger.info(f"Excel结果文件: {excel_path}")
     if not args.keep_empty:
         logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
+    if not args.no_consolidate:
+        logger.info("音频文件已整理到 consolidated_audio 文件夹")
     
     # 显示筛选统计信息
     if not args.disable_filter:
         logger.info(f"筛选统计: 移除 {processor.stats.get('filtered_results', 0)} 条结果，"
                    f"最终保留 {processor.stats.get('final_results', 0)} 条结果")
+    
+    # 显示时长统计信息
+    logger.info(f"原始总时长: {processor.stats['original_total_duration']:.2f} 秒")
+    logger.info(f"保留总时长: {processor.stats['final_total_duration']:.2f} 秒")
+    logger.info(f"有效数据比例: {processor.stats['effective_ratio']*100:.2f}%")
     
     # 显示使用的VAD模型信息
     logger.info(f"使用的VAD模型: {processor.vad_wrapper.model_type}")
