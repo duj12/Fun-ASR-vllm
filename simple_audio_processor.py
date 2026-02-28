@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 简化版音频处理器
-使用fsmnvad进行音频切分，对切分后的音频和原始短音频进行转写
+支持多种VAD模型进行音频切分，对切分后的音频和原始短音频进行转写
 结果保存到Excel文件中
 """
 
 import os
+import sys
 import json
 import logging
 import argparse
@@ -15,7 +16,7 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional, Union
 from qwen_asr import Qwen3ASRModel
 from funasr import AutoModel
 
@@ -30,6 +31,118 @@ logging.basicConfig(
     # ]
 )
 logger = logging.getLogger(__name__)
+
+CUR_DIR = os.path.dirname(__file__)
+sys.path.append(os.path.join(CUR_DIR, "FireRedASR2S"))
+# FireRedVad 相关导入（可选）
+try:
+    from fireredasr2s.fireredvad import FireRedVad, FireRedVadConfig
+    FIRERED_VAD_AVAILABLE = True
+except ImportError:
+    FIRERED_VAD_AVAILABLE = False
+    logger.warning("FireRedVad 未安装，将使用默认的 fsmn-vad 模型")
+
+
+class VADModelWrapper:
+    """VAD模型包装器，支持多种VAD模型"""
+    
+    def __init__(self, model_name: str, device: str = "cuda:0"):
+        self.model_name = model_name
+        self.device = device
+        self.model = None
+        self.model_type = None
+        self._initialize_model()
+    
+    def _initialize_model(self):
+        """初始化VAD模型"""
+        if self.model_name.lower() == "fireredvad":
+            if not FIRERED_VAD_AVAILABLE:
+                raise ImportError("FireRedVad 模型不可用，请安装 FireRedASR2S 库")
+            
+            logger.info("正在加载 FireRedVad 模型")
+            vad_config = FireRedVadConfig(
+                use_gpu=self.device.startswith("cuda"),
+                smooth_window_size=5,
+                speech_threshold=0.4,
+                min_speech_frame=20,
+                max_speech_frame=2000,
+                min_silence_frame=20,
+                merge_silence_frame=0,
+                extend_speech_frame=0,
+                chunk_max_frame=30000
+            )
+            self.model = FireRedVad.from_pretrained(
+                "FireRedASR2S/pretrained_models/FireRedVAD/VAD", 
+                vad_config
+            )
+            self.model_type = "fireredvad"
+            logger.info("FireRedVad 模型加载完成")
+            
+        else:
+            # 默认使用 fsmn-vad
+            logger.info(f"正在加载VAD模型: {self.model_name}")
+            self.model = AutoModel(model=self.model_name, model_revision="v2.0.4")
+            self.model_type = "fsmnvad"
+            logger.info(f"{self.model_name} 模型加载完成")
+    
+    def detect_segments(self, audio_path: str) -> List[Dict]:
+        """
+        检测音频中的语音段
+        
+        Args:
+            audio_path: 音频文件路径
+            
+        Returns:
+            List[Dict]: 语音段信息列表，每个元素包含 start_time, end_time, duration
+        """
+        if self.model_type == "fireredvad":
+            return self._detect_with_fireredvad(audio_path)
+        else:
+            return self._detect_with_fsmnvad(audio_path)
+    
+    def _detect_with_fireredvad(self, audio_path: str) -> List[Dict]:
+        """使用 FireRedVad 检测语音段"""
+        try:
+            result, probs = self.model.detect(audio_path)
+            
+            segments = []
+            if 'timestamps' in result:
+                for i, (start_sec, end_sec) in enumerate(result['timestamps']):
+                    segments.append({
+                        'segment_id': i,
+                        'start_time': start_sec * 1000,  # 转换为毫秒
+                        'end_time': end_sec * 1000,      # 转换为毫秒
+                        'duration': (end_sec - start_sec) * 1000  # 转换为毫秒
+                    })
+            
+            logger.info(f"FireRedVad 切分完成，共获得 {len(segments)} 个语音段")
+            return segments
+            
+        except Exception as e:
+            logger.error(f"FireRedVad 切分失败: {e}")
+            return []
+    
+    def _detect_with_fsmnvad(self, audio_path: str) -> List[Dict]:
+        """使用 fsmn-vad 检测语音段"""
+        try:
+            vad_result = self.model.generate(input=audio_path)
+            
+            segments = []
+            if vad_result and len(vad_result) > 0:
+                for i, segment_info in enumerate(vad_result[0]['value']):
+                    segments.append({
+                        'segment_id': i,
+                        'start_time': segment_info[0],
+                        'end_time': segment_info[1],
+                        'duration': segment_info[1] - segment_info[0]
+                    })
+            
+            logger.info(f"fsmn-vad 切分完成，共获得 {len(segments)} 个语音段")
+            return segments
+            
+        except Exception as e:
+            logger.error(f"fsmn-vad 切分失败: {e}")
+            return []
 
 
 class SimpleAudioProcessor:
@@ -51,8 +164,8 @@ class SimpleAudioProcessor:
         }
         self.dtype = dtype_map.get(dtype_str, torch.bfloat16)
         
-        logger.info(f"正在加载VAD模型: {vad_model_name}")
-        self.vad_model = AutoModel(model=vad_model_name, model_revision="v2.0.4")
+        # 初始化VAD模型包装器
+        self.vad_wrapper = VADModelWrapper(vad_model_name, device)
         
         logger.info(f"正在加载ASR模型: {asr_model_name}")
         self.asr_model = Qwen3ASRModel.from_pretrained(
@@ -109,7 +222,7 @@ class SimpleAudioProcessor:
 
     def vad_segmentation(self, audio_data: np.ndarray, sample_rate: int = 16000) -> List[Dict]:
         """
-        使用fsmnvad进行音频切分
+        使用配置的VAD模型进行音频切分
         
         Args:
             audio_data: 音频数据
@@ -123,22 +236,12 @@ class SimpleAudioProcessor:
             temp_wav_path = "temp_vad_input.wav"
             sf.write(temp_wav_path, audio_data, sample_rate)
             
-            # 使用VAD模型进行切分
-            vad_result = self.vad_model.generate(input=temp_wav_path)
+            # 使用VAD包装器进行切分
+            segments = self.vad_wrapper.detect_segments(temp_wav_path)
             
             # 清理临时文件
             if os.path.exists(temp_wav_path):
                 os.remove(temp_wav_path)
-            
-            segments = []
-            if vad_result and len(vad_result) > 0:
-                for i, segment_info in enumerate(vad_result[0]['value']):
-                    segments.append({
-                        'segment_id': i,
-                        'start_time': segment_info[0],
-                        'end_time': segment_info[1],
-                        'duration': segment_info[1] - segment_info[0]
-                    })
             
             logger.info(f"VAD切分完成，共获得 {len(segments)} 个语音段")
             self.stats['vad_segments'] += len(segments)
@@ -583,7 +686,9 @@ def main():
     parser.add_argument("--data_dir", default="./data", help="数据目录")
     parser.add_argument("--output_dir", default="./simple_results", help="输出目录")
     parser.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR模型名称")
-    parser.add_argument("--vad_model", default="fsmn-vad", help="VAD模型名称")
+    parser.add_argument("--vad_model", default="fireredvad", 
+                       choices=["fsmn-vad", "fireredvad"], 
+                       help="VAD模型名称")
     parser.add_argument("--device", default="cuda:0", help="计算设备")
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="数据类型")
     parser.add_argument("--no_progress", action="store_true", help="禁用进度显示")
@@ -592,6 +697,12 @@ def main():
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 检查FireRedVad可用性
+    if args.vad_model.lower() == "fireredvad" and not FIRERED_VAD_AVAILABLE:
+        logger.error("FireRedVad 模型不可用，请安装 FireRedASR2S 库")
+        logger.error("或者使用默认的 fsmn-vad 模型")
+        return
     
     processor = SimpleAudioProcessor(
         asr_model_name=args.asr_model,
@@ -616,6 +727,9 @@ def main():
     logger.info(f"Excel结果文件: {excel_path}")
     if not args.keep_empty:
         logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
+    
+    # 显示使用的VAD模型信息
+    logger.info(f"使用的VAD模型: {processor.vad_wrapper.model_type}")
 
 
 if __name__ == "__main__":
