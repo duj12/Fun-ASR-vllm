@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-datasets1=(
+datasets=(
     "/data/megastore/SHARE/TTS/VoiceClone2/Live_LuoYonghao/Live_LuoYonghao"
     "/data/megastore/SHARE/TTS/VoiceClone2/TTS_unlab/TTS_unlab"
     "/data/megastore/SHARE/TTS/VoiceClone2/20240122/20240122"
@@ -51,9 +51,7 @@ datasets1=(
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality14_en/HighQuality14_en"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15/HighQuality15"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone/HighQuality15_en/HighQuality15_en"
-)
-
-datasets2=(    
+  
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality1/HighQuality1"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality1_en/HighQuality1_en"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality2/HighQuality2"
@@ -86,10 +84,7 @@ datasets2=(
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality37_en/HighQuality37_en"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality38/HighQuality38"
     "/mnt/nas/Datasets/Audio/TTS/VoiceClone2/HighQuality38_en/HighQuality38_en"
-)
 
-
-datasets3=( 
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality17/HighQuality17"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality17_en/HighQuality17_en"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality18/HighQuality18"
@@ -122,9 +117,19 @@ datasets3=(
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality30_en/HighQuality30_en"    
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality32/HighQuality32"
     "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality32_en/HighQuality32_en"
-)
 
-datasets4=(
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_CN5k/ASR_CN5k"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_KeSpeech/ASR_KeSpeech"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_MLS/ASR_MLS"
+    "/data/megastore/SHARE/TTS/VoiceClone/Mandarin/Mandarin"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_English/ASR_English"
+    "/data/megastore/SHARE/TTS/VoiceClone/Conversation/Conversation"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_WenetSpeech/ASR_WenetSpeech"
+    "/data/megastore/SHARE/TTS/VoiceClone/ManEngMix/ManEngMix"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
+    "/data/megastore/SHARE/TTS/VoiceClone/ASR_Refine/ASR_Refine"
+
     "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS"
     "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS"
     "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS"
@@ -137,22 +142,10 @@ datasets4=(
     "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS"
     "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train"
     "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train" 
-    "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/test"
+    # "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/test"
 )
 
-datasets5=(  
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_CN5k/ASR_CN5k"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_English/ASR_English"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_KeSpeech/ASR_KeSpeech"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_WenetSpeech/ASR_WenetSpeech"
-    "/data/megastore/SHARE/TTS/VoiceClone/Mandarin/Mandarin"
-    "/data/megastore/SHARE/TTS/VoiceClone/ManEngMix/ManEngMix"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_MLS/ASR_MLS"
-    "/data/megastore/SHARE/TTS/VoiceClone/Conversation/Conversation"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_Refine/ASR_Refine"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_LibriHeavy/ASR_LibriHeavy"
-    "/data/megastore/SHARE/TTS/VoiceClone/ASR_GigaSpeech/ASR_GigaSpeech"
-)
+
 
 # 无标注数据 模型转写为text_itn, 经过正则去标点->text_tn
 # for dataset in "${datasets1[@]}"; do
@@ -202,16 +195,22 @@ datasets5=(
 # done
 
 
-# 数据写成SVS的jsonl格式
+# # 数据写成SVS的jsonl格式
+# for dataset in "${datasets4[@]}"; do
+#     sub=$(basename "$dataset")
+#     echo "run $sub"
 
-for dataset in "${datasets4[@]}"; do
+#     python -u scp2svsjsonl.py \
+#     --wav_scp $dataset/wav.scp \
+#     --text_itn $dataset/text_itn \
+#     --text_tn $dataset/text_tn \
+#     --wav2dur $dataset/wav2dur \
+#     --output $dataset/sensevoice.jsonl
+# done
+
+# 全部数据合并
+for dataset in "${datasets[@]}"; do
     sub=$(basename "$dataset")
     echo "run $sub"
-
-    python -u scp2svsjsonl.py \
-    --wav_scp $dataset/wav.scp \
-    --text_itn $dataset/text_itn \
-    --text_tn $dataset/text_tn \
-    --wav2dur $dataset/wav2dur \
-    --output $dataset/sensevoice.jsonl
+    echo $dataset/sensevoice.jsonl >> /data/megastore/Datasets/ASR/jsonl/SenseVoice/train.list
 done
