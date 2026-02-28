@@ -15,6 +15,7 @@ import torch
 import numpy as np
 import pandas as pd
 import soundfile as sf
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 from qwen_asr import Qwen3ASRModel
@@ -145,6 +146,286 @@ class VADModelWrapper:
             return []
 
 
+class AudioFilter:
+    """音频筛选器，用于过滤低质量的转写结果"""
+    
+    def __init__(self, 
+                 min_chars_no_punct: int = 3,
+                 similarity_threshold: float = 0.6,
+                 noise_indicators: List[str] = None):
+        """
+        初始化筛选器
+        
+        Args:
+            min_chars_no_punct: 无标点时的最小字符数
+            similarity_threshold: 文本相似度阈值（用于检测重复内容）
+            noise_indicators: 噪声指示词列表
+        """
+        self.min_chars_no_punct = min_chars_no_punct
+        self.similarity_threshold = similarity_threshold
+        self.noise_indicators = noise_indicators or [
+            '嗯', '啊', '呃', '哦', '哈', '嘿', '哼', '咳', '喂'
+        ]
+        
+        # 中文标点符号
+        self.chinese_punctuation = set(',.?!:，。！？；：""''（）【】《》、')
+    
+    def remove_punctuation(self, text: str) -> str:
+        """移除文本中的标点符号"""
+        if not text:
+            return ""
+        # 移除中文标点
+        for punct in self.chinese_punctuation:
+            text = text.replace(punct, '')
+        # 移除英文标点
+        text = re.sub(r'[^\w\s]', '', text)
+        return text.strip()
+    
+    def calculate_similarity(self, text1: str, text2: str) -> float:
+        """
+        计算两个文本的相似度（基于字符级别的Jaccard相似度）
+        
+        Args:
+            text1: 第一个文本
+            text2: 第二个文本
+            
+        Returns:
+            float: 相似度分数 (0-1)
+        """
+        if not text1 or not text2:
+            return 0.0
+            
+        # 转换为字符集合
+        set1 = set(text1)
+        set2 = set(text2)
+        
+        # 计算交集和并集
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
+        
+        if len(union) == 0:
+            return 0.0
+            
+        return len(intersection) / len(union)
+    
+    def is_noise_text(self, text: str) -> bool:
+        """
+        判断文本是否为噪声文本
+        
+        Args:
+            text: 待判断的文本
+            
+        Returns:
+            bool: 是否为噪声文本
+        """
+        if not text:
+            return True
+            
+        clean_text = self.remove_punctuation(text)
+        
+        # 规则1: 无标点且字符数过少
+        if len(clean_text) <= self.min_chars_no_punct:
+            return True
+            
+        # 规则2: 包含过多噪声词汇
+        noise_words = [word for word in self.noise_indicators if word in text]
+        if len(noise_words) > 0 and len(clean_text) <= 5:
+            # 如果包含噪声词且总长度很短，则认为是噪声
+            noise_ratio = len(''.join(noise_words)) / len(clean_text)
+            if noise_ratio > 0.5:
+                return True
+                
+        # 规则3: 重复字符过多（可能是噪声）
+        if len(set(clean_text)) < len(clean_text) * 0.3:  # 字符多样性不足30%
+            return True
+            
+        return False
+    
+    def filter_results(self, results: List[Dict]) -> List[Dict]:
+        """
+        对转写结果进行筛选
+        
+        Args:
+            results: 转写结果列表
+            
+        Returns:
+            List[Dict]: 筛选后的结果列表
+        """
+        logger.info(f"开始筛选 {len(results)} 条转写结果...")
+        
+        # 第一步：基础筛选 - 移除明显噪声的音频
+        filtered_results = []
+        removed_count = 0
+        
+        for result in results:
+            if not self.is_noise_text(result['transcription']):
+                filtered_results.append(result)
+            else:
+                logger.debug(f"移除噪声音频: {result['audio_name']} - '{result['transcription']}'")
+                removed_count += 1
+                # 删除对应的音频文件
+                self._remove_audio_file(result)
+        
+        logger.info(f"基础筛选完成，移除 {removed_count} 条噪声结果")
+        
+        # 第二步：去重筛选 - 移除重复内容
+        final_results = self._remove_duplicates(filtered_results)
+        
+        logger.info(f"去重筛选完成，最终保留 {len(final_results)} 条结果")
+        
+        return final_results
+    
+    def _remove_duplicates(self, results: List[Dict]) -> List[Dict]:
+        """
+        移除重复内容的音频（保留字数较多的）
+        修改为不按类型分组，统一进行去重比较
+        添加包含关系检测功能
+        
+        Args:
+            results: 筛选后的结果列表
+            
+        Returns:
+            List[Dict]: 去重后的结果列表
+        """
+        if len(results) <= 1:
+            return results
+            
+        # 不再按类型分组，将所有音频放在一起进行去重比较
+        # 这样可以发现VAD切分音频和原始短音频之间的重复内容
+        
+        # 按文本长度排序（长的优先保留）
+        sorted_results = sorted(results, 
+                              key=lambda x: len(self.remove_punctuation(x['transcription'])), 
+                              reverse=True)
+        
+        kept_results = []
+        removed_indices = set()
+        
+        for i, result in enumerate(sorted_results):
+            if i in removed_indices:
+                continue
+                
+            current_text = self.remove_punctuation(result['transcription'])
+            current_full_text = result['transcription']  # 保留完整文本用于包含检测
+            kept_results.append(result)
+            
+            # 检查所有后续结果是否与当前结果重复（包括不同类型）
+            for j in range(i + 1, len(sorted_results)):
+                if j in removed_indices:
+                    continue
+                    
+                compare_result = sorted_results[j]
+                compare_text = self.remove_punctuation(compare_result['transcription'])
+                compare_full_text = compare_result['transcription']
+                
+                # 检查相似度
+                similarity = self.calculate_similarity(current_text, compare_text)
+                
+                # 检查包含关系
+                is_contained = self._is_text_contained(current_full_text, compare_full_text)
+                
+                if similarity >= self.similarity_threshold or is_contained:
+                    reason = "包含关系" if is_contained else f"相似度{similarity:.2f}"
+                    logger.debug(f"发现重复/包含内容，移除: {compare_result['audio_name']} "
+                               f"(与 {result['audio_name']} {reason})")
+                    removed_indices.add(j)
+                    # 删除对应的音频文件
+                    self._remove_audio_file(compare_result)
+        
+        # 对最终结果按音频名称排序，方便查看
+        final_sorted_results = sorted(kept_results, key=lambda x: x['audio_name'])
+        
+        return final_sorted_results
+    
+    def _is_text_contained(self, longer_text: str, shorter_text: str) -> bool:
+        """
+        检查较短文本是否被较长文本完全包含
+        
+        Args:
+            longer_text: 较长的文本
+            shorter_text: 较短的文本
+            
+        Returns:
+            bool: 是否存在包含关系
+        """
+        if not longer_text or not shorter_text:
+            return False
+            
+        # 移除标点进行比较
+        clean_longer = self.remove_punctuation(longer_text)
+        clean_shorter = self.remove_punctuation(shorter_text)
+        
+        # 如果清理后的短文本长度大于长文本，肯定不包含
+        if len(clean_shorter) > len(clean_longer):
+            return False
+            
+        # 检查是否包含（忽略大小写）
+        return clean_shorter.lower() in clean_longer.lower()
+    
+    def _deduplicate_group(self, group_results: List[Dict]) -> List[Dict]:
+        """
+        对同一组音频进行去重处理
+        
+        Args:
+            group_results: 同一组的音频结果
+            
+        Returns:
+            List[Dict]: 去重后的结果
+        """
+        if len(group_results) <= 1:
+            return group_results
+            
+        # 按文本长度排序（长的优先保留）
+        sorted_results = sorted(group_results, 
+                              key=lambda x: len(self.remove_punctuation(x['transcription'])), 
+                              reverse=True)
+        
+        kept_results = []
+        removed_indices = set()
+        
+        for i, result in enumerate(sorted_results):
+            if i in removed_indices:
+                continue
+                
+            current_text = self.remove_punctuation(result['transcription'])
+            kept_results.append(result)
+            
+            # 检查后续结果是否与当前结果重复
+            for j in range(i + 1, len(sorted_results)):
+                if j in removed_indices:
+                    continue
+                    
+                compare_result = sorted_results[j]
+                compare_text = self.remove_punctuation(compare_result['transcription'])
+                
+                similarity = self.calculate_similarity(current_text, compare_text)
+                
+                if similarity >= self.similarity_threshold:
+                    logger.debug(f"发现重复内容，移除: {compare_result['audio_name']} "
+                               f"(相似度: {similarity:.2f})")
+                    removed_indices.add(j)
+                    # 删除对应的音频文件
+                    self._remove_audio_file(compare_result)
+        
+        return kept_results
+    
+    def _remove_audio_file(self, result: Dict):
+        """
+        删除对应的音频文件
+        
+        Args:
+            result: 包含音频文件信息的结果字典
+        """
+        try:
+            if 'audio_path' in result:
+                audio_path = result['audio_path']
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                    logger.debug(f"已删除音频文件: {audio_path}")
+        except Exception as e:
+            logger.warning(f"删除音频文件失败: {e}")
+
+
 class SimpleAudioProcessor:
     """简化版音频处理器"""
     
@@ -152,7 +433,10 @@ class SimpleAudioProcessor:
                  asr_model_name: str = "Qwen/Qwen3-ASR-1.7B",
                  vad_model_name: str = "fsmn-vad",
                  device: str = "cuda:0",
-                 dtype_str: str = "bfloat16"):
+                 dtype_str: str = "bfloat16",
+                 enable_filtering: bool = True,
+                 min_chars_no_punct: int = 2,
+                 similarity_threshold: float = 0.6):
         """
         初始化处理器
         """
@@ -163,6 +447,16 @@ class SimpleAudioProcessor:
             "float32": torch.float32
         }
         self.dtype = dtype_map.get(dtype_str, torch.bfloat16)
+        
+        # 初始化筛选器
+        self.enable_filtering = enable_filtering
+        if enable_filtering:
+            self.audio_filter = AudioFilter(
+                min_chars_no_punct=min_chars_no_punct,
+                similarity_threshold=similarity_threshold
+            )
+        else:
+            self.audio_filter = None
         
         # 初始化VAD模型包装器
         self.vad_wrapper = VADModelWrapper(vad_model_name, device)
@@ -185,7 +479,9 @@ class SimpleAudioProcessor:
             'successful_transcriptions': 0,
             'failed_transcriptions': 0,
             'vad_segments': 0,
-            'empty_folders_removed': 0
+            'empty_folders_removed': 0,
+            'filtered_results': 0,  # 新增：筛选掉的结果数
+            'final_results': 0      # 新增：最终保留的结果数
         }
     
     def load_pcm_audio(self, pcm_path: str) -> np.ndarray:
@@ -467,6 +763,7 @@ class SimpleAudioProcessor:
                     'transcription': transcription,
                     'audio_type': 'vad_segment',
                     'duration': duration,  # 添加时长信息（秒）
+                    'audio_path': segment_path,  # 添加音频路径用于后续删除
                     'segment_info': {
                         'segment_id': segment['segment_id'],
                         'start_time': segment['start_time'],
@@ -503,11 +800,21 @@ class SimpleAudioProcessor:
                     'audio_name': f"{sid}.wav",
                     'transcription': transcription,
                     'audio_type': 'short_audio',
-                    'duration': short_duration  # 添加时长信息（秒）
+                    'duration': short_duration,  # 添加时长信息（秒）
+                    'audio_path': short_wav_path  # 添加音频路径用于后续删除
                 }
                 transcription_results.append(result_entry)
                 
                 self.stats['processed_audios'] += 1
+            
+            # 应用筛选器（如果启用）
+            if self.audio_filter and transcription_results:
+                original_count = len(transcription_results)
+                transcription_results = self.audio_filter.filter_results(transcription_results)
+                filtered_count = original_count - len(transcription_results)
+                self.stats['filtered_results'] += filtered_count
+                self.stats['final_results'] += len(transcription_results)
+                logger.info(f"筛选完成: 原始{original_count}条 -> 最终{len(transcription_results)}条")
             
             # 清理解压的PCM文件
             self.cleanup_pcm_files(work_dir)
@@ -657,6 +964,8 @@ class SimpleAudioProcessor:
                 'failed_transcriptions': self.stats['failed_transcriptions'],
                 'vad_segments': self.stats['vad_segments'],
                 'empty_folders_removed': self.stats['empty_folders_removed'],
+                'filtered_results': self.stats.get('filtered_results', 0),
+                'final_results': self.stats.get('final_results', 0),
                 'success_rate': (
                     self.stats['successful_transcriptions'] / 
                     (self.stats['successful_transcriptions'] + self.stats['failed_transcriptions']) 
@@ -686,13 +995,18 @@ def main():
     parser.add_argument("--data_dir", default="./data", help="数据目录")
     parser.add_argument("--output_dir", default="./simple_results", help="输出目录")
     parser.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR模型名称")
-    parser.add_argument("--vad_model", default="fireredvad", 
+    parser.add_argument("--vad_model", default="fsmn-vad", 
                        choices=["fsmn-vad", "fireredvad"], 
                        help="VAD模型名称")
     parser.add_argument("--device", default="cuda:0", help="计算设备")
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="数据类型")
     parser.add_argument("--no_progress", action="store_true", help="禁用进度显示")
     parser.add_argument("--keep_empty", action="store_true", help="保留空文件夹（不清除）")
+    
+    # 筛选相关参数
+    parser.add_argument("--disable_filter", action="store_true", help="禁用音频筛选功能")
+    parser.add_argument("--min_chars", type=int, default=2, help="无标点时的最小字符数")
+    parser.add_argument("--similarity", type=float, default=0.6, help="文本相似度阈值")
     
     args = parser.parse_args()
     
@@ -708,7 +1022,10 @@ def main():
         asr_model_name=args.asr_model,
         vad_model_name=args.vad_model,
         device=args.device,
-        dtype_str=args.dtype
+        dtype_str=args.dtype,
+        enable_filtering=not args.disable_filter,
+        min_chars_no_punct=args.min_chars,
+        similarity_threshold=args.similarity
     )
     
     # 批量处理
@@ -727,6 +1044,11 @@ def main():
     logger.info(f"Excel结果文件: {excel_path}")
     if not args.keep_empty:
         logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
+    
+    # 显示筛选统计信息
+    if not args.disable_filter:
+        logger.info(f"筛选统计: 移除 {processor.stats.get('filtered_results', 0)} 条结果，"
+                   f"最终保留 {processor.stats.get('final_results', 0)} 条结果")
     
     # 显示使用的VAD模型信息
     logger.info(f"使用的VAD模型: {processor.vad_wrapper.model_type}")
