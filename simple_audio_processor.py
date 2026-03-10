@@ -127,7 +127,7 @@ class VADModelWrapper:
     def _detect_with_fsmnvad(self, audio_path: str) -> List[Dict]:
         """使用 fsmn-vad 检测语音段"""
         try:
-            vad_result = self.model.generate(input=audio_path)
+            vad_result = self.model.generate(input=audio_path, max_end_silence_time=800, max_single_segment_time=30000)
             
             segments = []
             if vad_result and len(vad_result) > 0:
@@ -488,23 +488,56 @@ class SimpleAudioProcessor:
             'effective_ratio': 0.0           # 有效数据比例
         }
     
-    def load_pcm_audio(self, pcm_path: str) -> np.ndarray:
+    def load_pcm_audio(self, pcm_path: str, source_channels=2, target_channels: int = 1) -> np.ndarray:
         """
-        加载PCM音频文件
+        加载 PCM 音频文件，支持单通道和双通道
         
         Args:
-            pcm_path: PCM文件路径
+            pcm_path: PCM 文件路径
+            source_channels: 输入源通道数，默认为 2（立体声）
+            target_channels: 目标通道数，默认为 1（单通道）
+                          如果原始音频是双通道而目标是单通道，会自动混合为单通道
             
         Returns:
-            np.ndarray: 音频数据
+            np.ndarray: 音频数据（float32 格式，归一化到 [-1, 1]）
         """
         try:
             with open(pcm_path, 'rb') as f:
-                raw_audio = np.frombuffer(f.read(), dtype=np.int16)
+                raw_data = f.read()
+            
+            # 按 int16 解析原始数据
+            raw_audio = np.frombuffer(raw_data, dtype=np.int16)
+            
+            # 计算总样本数
+            total_samples = len(raw_audio)
+            
+            # 判断通道数（假设双通道是交错存储的：LRLRLRLR...）
+            # 如果样本数是偶数，可能是双通道；如果是奇数，则是单通道
+            if source_channels==2 : # or (total_samples % 2 == 0 and total_samples > 0):
+                # 尝试作为双通道处理
+                num_frames = total_samples // 2
+                # 重塑为 (帧数，2) 的二维数组，每行包含左右声道样本
+                stereo_audio = raw_audio.reshape(-1, 2)
+                
+                if target_channels == 1:
+                    # 将双通道混合为单通道：取左右声道的平均值
+                    mono_audio = stereo_audio.mean(axis=1).astype(np.float32)
+                    audio_float = mono_audio / 32768.0
+                    logger.debug(f"PCM 文件 {pcm_path} 为双通道，已转换为单通道")
+                    return audio_float
+                else:
+                    # 保持双通道输出
+                    audio_float = stereo_audio.astype(np.float32) / 32768.0
+                    logger.debug(f"PCM 文件 {pcm_path} 为双通道，保持双通道输出")
+                    return audio_float
+            else:
+                # 单通道处理
                 audio_float = raw_audio.astype(np.float32) / 32768.0
-            return audio_float
+                logger.debug(f"PCM 文件 {pcm_path} 为单通道")
+                return audio_float
+                
         except Exception as e:
-            logger.error(f"加载PCM文件失败 {pcm_path}: {e}")
+            logger.error(f"加载 PCM 文件失败 {pcm_path}: {e}")
             raise
             
     def get_audio_duration(self, audio_data: np.ndarray, sample_rate: int = 16000) -> float:
@@ -793,7 +826,7 @@ class SimpleAudioProcessor:
                 sid = short_audio_file.stem
                 
                 # 加载短音频
-                short_audio_data = self.load_pcm_audio(str(short_audio_file))
+                short_audio_data = self.load_pcm_audio(str(short_audio_file), source_channels=1)
                 
                 # 保存为WAV格式
                 short_wav_path = os.path.join(work_dir, f"{sid}.wav")
