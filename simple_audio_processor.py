@@ -513,23 +513,35 @@ class SimpleAudioProcessor:
             
             # 判断通道数（假设双通道是交错存储的：LRLRLRLR...）
             # 如果样本数是偶数，可能是双通道；如果是奇数，则是单通道
-            if source_channels==2 : # or (total_samples % 2 == 0 and total_samples > 0):
+            if source_channels == 2:
                 # 尝试作为双通道处理
                 num_frames = total_samples // 2
                 # 重塑为 (帧数，2) 的二维数组，每行包含左右声道样本
-                stereo_audio = raw_audio.reshape(-1, 2)
+                stereo_audio = raw_audio.reshape(-1, 2).astype(np.float32) / 32768.0
+                logger.debug(f"PCM 文件 {pcm_path} 为双通道")
                 
+                # 第一通道: 用户输入语音(含回声)，第二通道: 纯净数字人播报回采
+                ch_user = stereo_audio[:, 0]
+                ch_ref = stereo_audio[:, 1]
+
                 if target_channels == 1:
-                    # 将双通道混合为单通道：取左右声道的平均值
-                    mono_audio = stereo_audio.mean(axis=1).astype(np.float32)
-                    audio_float = mono_audio / 32768.0
-                    logger.debug(f"PCM 文件 {pcm_path} 为双通道，已转换为单通道")
-                    return audio_float
+                    # 检查第二通道是否为有效语音（非全零 / 非接近零）
+                    ref_energy = np.mean(ch_ref ** 2) if ch_ref.size > 0 else 0.0
+                    # 经验阈值：能量非常小则认为没有接回采通道
+                    if ref_energy > 1e-8:
+                        logger.info(
+                            f"检测到有效回采通道，执行回声消除: {pcm_path}, ref_energy={ref_energy:.2e}"
+                        )
+                        # 对第一通道进行回声消除，输出单通道
+                        processed = self._echo_cancellation(ch_user, ch_ref)
+                        return processed.astype(np.float32)
+                    else:
+                        # 无有效回采，直接返回第一通道
+                        logger.info(f"未检测到有效回采通道，直接使用第一通道: {pcm_path}")
+                        return ch_user.astype(np.float32)
                 else:
-                    # 保持双通道输出
-                    audio_float = stereo_audio.astype(np.float32) / 32768.0
-                    logger.debug(f"PCM 文件 {pcm_path} 为双通道，保持双通道输出")
-                    return audio_float
+                    # 保持双通道输出（归一化后的浮点格式）
+                    return stereo_audio.astype(np.float32)
             else:
                 # 单通道处理
                 audio_float = raw_audio.astype(np.float32) / 32768.0
@@ -539,6 +551,59 @@ class SimpleAudioProcessor:
         except Exception as e:
             logger.error(f"加载 PCM 文件失败 {pcm_path}: {e}")
             raise
+    
+    def _echo_cancellation(
+        self,
+        mic_signal: np.ndarray,
+        ref_signal: np.ndarray,
+        filter_len: int = 256,
+        step_size: float = 0.1,
+    ) -> np.ndarray:
+        """
+        使用简单的 NLMS 自适应滤波对第一通道做回声消除
+        
+        Args:
+            mic_signal: 麦克风信号（包含用户语音 + 回声）
+            ref_signal: 参考信号（纯净数字人播报）
+            filter_len: 自适应滤波器长度
+            step_size: 学习步长（0-1 之间，越大收敛越快但更不稳定）
+        """
+        mic = mic_signal.astype(np.float32)
+        ref = ref_signal.astype(np.float32)
+
+        n_samples = min(len(mic), len(ref))
+        mic = mic[:n_samples]
+        ref = ref[:n_samples]
+
+        # 预分配输出和滤波器
+        y = np.zeros_like(mic, dtype=np.float32)
+        e = np.zeros_like(mic, dtype=np.float32)
+        w = np.zeros(filter_len, dtype=np.float32)
+
+        eps = 1e-8
+
+        # 简单逐样本 NLMS，自适应估计回声成分
+        for n in range(n_samples):
+            # 构造当前参考向量 x_vec (长度为 filter_len)
+            start = n - filter_len + 1
+            if start < 0:
+                # 不足长度时用 0 填充
+                x_vec = np.zeros(filter_len, dtype=np.float32)
+                x_vec[-(n + 1):] = ref[: n + 1][::-1]
+            else:
+                x_vec = ref[start : n + 1][::-1]
+
+            # 估计回声
+            y[n] = np.dot(w, x_vec)
+            # 误差信号 = 麦克风 - 估计回声 ≈ 纯用户语音
+            e[n] = mic[n] - y[n]
+
+            # NLMS 权值更新
+            norm_x = np.dot(x_vec, x_vec) + eps
+            mu = step_size / norm_x
+            w += mu * e[n] * x_vec
+
+        return e
             
     def get_audio_duration(self, audio_data: np.ndarray, sample_rate: int = 16000) -> float:
         """
