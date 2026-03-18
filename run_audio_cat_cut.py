@@ -6,9 +6,11 @@ Audio concat and split tool
 Stage 1: Group by duration -> pad silence -> concat to ~12h audio files
 Stage 2: Align recorded audio with original (cross-correlation offset detection)
 Stage 3: Split aligned audio by original segment duration, restore text
+Stage 4: ASR evaluation on split segments, output WER to Excel
 """
 
 import os
+import sys
 import argparse
 import logging
 import numpy as np
@@ -395,6 +397,56 @@ def stage3_split(aligned_wav, concat_tn_txt, concat_itn_txt, output_dir,
         logger.info(f"split done (4ch): {len(new_tn_4ch)} segs -> {output_dir_4ch}")
 
 
+def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str):
+    """Stage 4: 对切分后的音频做 ASR 识别，计算 WER，写入 Excel（wav_name, text, asr, wer）。"""
+    try:
+        import openpyxl
+    except ImportError:
+        raise ImportError("stage4 需要 openpyxl，请执行: pip install openpyxl")
+
+    # ASR_Checker 内部会调用 ASR_client_api.parse_args() 解析 sys.argv，会与本脚本参数冲突，故临时还原 argv
+    _argv = sys.argv
+    try:
+        sys.argv = [sys.argv[0]]
+        from asr_check import ASR_Checker
+        asr_checker = ASR_Checker()
+    finally:
+        sys.argv = _argv
+
+    items = _read_text_items(text_file)
+    if not items:
+        logger.warning("text_file 为空，未生成任何结果")
+        return
+    rows = []
+    for i, (wav_name, text) in enumerate(items):
+        audio_path = os.path.join(segments_dir, f"{wav_name}.wav")
+        if not os.path.isfile(audio_path):
+            logger.warning(f"跳过缺失音频: {audio_path}")
+            rows.append({"wav_name": wav_name, "text": text, "asr": "", "wer": ""})
+            continue
+        try:
+            result = asr_checker.check(text, audio_path)
+            asr = result.get("asr_text", "")
+            wer = result.get("stats", {}).get("wer", float("nan"))
+        except Exception as e:
+            logger.warning(f"{wav_name} ASR 失败: {e}")
+            asr, wer = "", float("nan")
+        rows.append({"wav_name": wav_name, "text": text, "asr": asr, "wer": wer})
+        if (i + 1) % 50 == 0:
+            logger.info(f"已处理 {i + 1}/{len(items)} 条")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ASR"
+    ws.append(["wav_name", "text", "asr", "wer"])
+    for r in rows:
+        ws.append([r["wav_name"], r["text"], r["asr"], r["wer"]])
+
+    os.makedirs(os.path.dirname(output_excel) or ".", exist_ok=True)
+    wb.save(output_excel)
+    logger.info(f"ASR 结果已写入: {output_excel} 共 {len(rows)} 条")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Audio concat and split tool")
     sub = parser.add_subparsers(dest="stage")
@@ -426,6 +478,11 @@ def parse_args():
     p3.add_argument("--aligned_wav_4ch", default=None, help="对齐后的4通道WAV，指定则同时切分4通道")
     p3.add_argument("--output_dir_4ch", default=None, help="4通道切分结果输出目录（与 --aligned_wav_4ch 成对使用）")
 
+    p4 = sub.add_parser("asr_eval", help="Stage 4: 对切分音频做 ASR 识别与 WER，输出 Excel")
+    p4.add_argument("--segments_dir", required=True, help="Stage3 切分结果目录（含 wav 与对应 text 文件所在目录）")
+    p4.add_argument("--text_file", required=True, help="切分文本列表，格式: segment_id\\ttext（如 *_text_tn.txt）")
+    p4.add_argument("--output_excel", required=True, help="输出 Excel 路径（.xlsx），列: wav_name, text, asr, wer")
+
     return parser.parse_args()
 
 
@@ -449,8 +506,10 @@ def main():
             aligned_wav_4ch=args.aligned_wav_4ch,
             output_dir_4ch=args.output_dir_4ch,
         )
+    elif args.stage == "asr_eval":
+        stage4_asr_eval(args.segments_dir, args.text_file, args.output_excel)
     else:
-        logger.error("please specify stage: concat / align / split")
+        logger.error("please specify stage: concat / align / split / asr_eval")
 
 
 if __name__ == "__main__":
@@ -479,4 +538,10 @@ if __name__ == "__main__":
 #     --segment_sec 10 \
 #     --aligned_wav_4ch output/aligned/10s_01_4ch.wav \
 #     --output_dir_4ch output/segments_4ch
+#
+# # Phase 4（切分音频 ASR 识别 + WER，输出 Excel）
+# python run_audio_cat_cut.py asr_eval \
+#     --segments_dir output/segments \
+#     --text_file output/segments/10s_01_ch1_text_tn.txt \
+#     --output_excel output/asr_wer_10s_01.xlsx
     main()
