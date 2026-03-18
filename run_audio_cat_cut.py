@@ -63,6 +63,36 @@ def pad_silence(audio: np.ndarray, target_samples: int) -> np.ndarray:
     return np.pad(audio, (0, target_samples - len(audio)), mode="constant")
 
 
+def pad_silence_mc(audio: np.ndarray, target_samples: int) -> np.ndarray:
+    """Pad silence for multi-channel audio (N, C)."""
+    if audio.ndim == 1:
+        return pad_silence(audio, target_samples)
+    if len(audio) >= target_samples:
+        return audio[:target_samples]
+    return np.pad(audio, ((0, target_samples - len(audio)), (0, 0)), mode="constant")
+
+
+def load_pcm(path: str, channels: int = 1, dtype=np.int16,
+             sr: int = SAMPLE_RATE) -> np.ndarray:
+    """Load raw PCM file -> float32. Returns (N,) for mono or (N, C) for multi-channel."""
+    raw = np.fromfile(path, dtype=dtype)
+    if channels > 1:
+        remainder = len(raw) % channels
+        if remainder != 0:
+            logger.warning(
+                f"PCM sample count {len(raw)} not divisible by {channels}, "
+                f"truncating last {remainder} samples"
+            )
+            raw = raw[:len(raw) - remainder]
+        raw = raw.reshape(-1, channels)
+    audio = raw.astype(np.float32) / np.iinfo(dtype).max
+    logger.info(
+        f"loaded PCM {path}: shape={audio.shape}, "
+        f"dur={len(audio)/sr:.2f}s, range=[{audio.min():.4f}, {audio.max():.4f}]"
+    )
+    return audio
+
+
 def write_text_list(path: str, items: List[Tuple[str, str]]):
     with open(path, "w", encoding="utf-8") as f:
         for utt_id, text in items:
@@ -129,37 +159,141 @@ def stage1_concat(wav_scp, text_tn_file, text_itn_file, wav2dur_file,
                 fidx += 1
 
 
-def _find_offset_xcorr(ref, rec, search_range_sec=30.0, sr=SAMPLE_RATE):
+def _find_speech_onset(audio, sr, frame_ms=10,
+                       threshold_ratio=0.05, min_consecutive=3):
+    """Return sample index where speech begins (energy-based)."""
+    frame_len = int(sr * frame_ms / 1000)
+    n_frames = len(audio) // frame_len
+    if n_frames == 0:
+        return 0
+    rms = np.array([
+        np.sqrt(np.mean(audio[i * frame_len:(i + 1) * frame_len] ** 2))
+        for i in range(n_frames)
+    ])
+    thresh = rms.max() * threshold_ratio
+    streak = 0
+    for i, r in enumerate(rms):
+        if r > thresh:
+            streak += 1
+            if streak >= min_consecutive:
+                return max(0, (i - min_consecutive + 1) * frame_len)
+        else:
+            streak = 0
+    return 0
+
+
+def _find_offset_xcorr(ref, rec, search_range_sec=60.0, sr=SAMPLE_RATE):
+    """Normalized cross-correlation with speech-anchored template.
+
+    Returns *offset* such that ``rec[offset:]`` aligns with ``ref[0:]``.
+
+    Key fixes over the previous version:
+    * Template starts at the first speech onset in *ref* (skips leading silence
+      and avoids using a mostly-silent template).
+    * Normalised cross-correlation (NCC) so correlation magnitude is
+      independent of local energy.
+    * Correct k -> position mapping: ``conv[k]`` from the FFT convolution
+      corresponds to the template placed at position ``k - (tpl_len - 1)``,
+      not at ``k``.
+    """
     from numpy.fft import fft, ifft
 
-    tpl_len = int(min(10.0, len(ref) / sr) * sr)
-    tpl = ref[:tpl_len].astype(np.float64)
-    search_len = int(search_range_sec * sr) + tpl_len
-    region = rec[:min(search_len, len(rec))].astype(np.float64)
-    if len(region) < len(tpl):
+    ref_onset = _find_speech_onset(ref, sr)
+    tpl_dur = min(5.0, (len(ref) - ref_onset) / sr)
+    tpl_len = int(tpl_dur * sr)
+    if tpl_len == 0:
         return 0
+    tpl = ref[ref_onset:ref_onset + tpl_len].astype(np.float64)
+
+    search_samples = int(search_range_sec * sr) + tpl_len
+    region = rec[:min(search_samples, len(rec))].astype(np.float64)
+    if len(region) < tpl_len:
+        return 0
+
     n = len(region)
+
+    # --- FFT cross-correlation ---
     t = np.zeros(n, dtype=np.float64)
-    t[:len(tpl)] = tpl[::-1]
-    corr = np.real(ifft(fft(region) * fft(t)))
-    return int(np.argmax(corr[:n - len(tpl) + 1]))
+    t[:tpl_len] = tpl[::-1]
+    xcorr = np.real(ifft(fft(region) * fft(t)))
+
+    # --- normalise ---
+    tpl_energy = np.sum(tpl ** 2)
+    cum = np.cumsum(region ** 2)
+    valid_len = n - tpl_len + 1          # number of valid positions
+    win_energy = np.empty(valid_len)
+    win_energy[0] = cum[tpl_len - 1]
+    if valid_len > 1:
+        win_energy[1:] = cum[tpl_len:] - cum[:valid_len - 1]
+    denom = np.sqrt(tpl_energy * win_energy + 1e-12)
+
+    # conv[k] <-> template at position (k - tpl_len + 1)
+    # valid positions: 0 .. valid_len-1  <->  k = tpl_len-1 .. n-1
+    ncc = xcorr[tpl_len - 1:tpl_len - 1 + valid_len] / denom
+
+    best_pos = int(np.argmax(ncc))       # position in *region*
+    # ref[ref_onset] matches rec[best_pos]  =>  ref[0] matches rec[best_pos - ref_onset]
+    offset = best_pos - ref_onset
+
+    logger.info(
+        f"xcorr: ref_onset={ref_onset}({ref_onset / sr:.3f}s) "
+        f"match_pos={best_pos}({best_pos / sr:.3f}s) "
+        f"ncc={ncc[best_pos]:.4f} offset={offset}({offset / sr:.3f}s)"
+    )
+    return max(0, offset)
 
 
-def stage2_align(concat_wav, recorded_wav, output_wav,
-                 search_range_sec=30.0, sample_rate=SAMPLE_RATE):
+def stage2_align(concat_wav, recorded_1ch_pcm, recorded_4ch_pcm,
+                 output_1ch_wav, output_4ch_wav,
+                 search_range_sec=60.0, sample_rate=SAMPLE_RATE):
     ref = load_audio_mono(concat_wav, sample_rate)
-    rec = load_audio_mono(recorded_wav, sample_rate)
-    offset = _find_offset_xcorr(ref, rec, search_range_sec, sample_rate)
-    logger.info(f"offset: {offset} samples ({offset / sample_rate:.3f}s)")
+    rec_1ch = load_pcm(recorded_1ch_pcm, channels=1, sr=sample_rate)
+    rec_4ch = load_pcm(recorded_4ch_pcm, channels=4, sr=sample_rate)
 
-    aligned = rec[offset:offset + len(ref)]
-    if len(aligned) < len(ref):
-        aligned = pad_silence(aligned, len(ref))
-        logger.warning("recorded audio too short, padded silence at tail")
+    ref_len = len(ref)
 
-    os.makedirs(os.path.dirname(output_wav) or ".", exist_ok=True)
-    sf.write(output_wav, aligned, sample_rate)
-    logger.info(f"aligned -> {output_wav}  dur={len(aligned)/sample_rate/3600:.2f}h")
+    # ---- align 1ch independently ----
+    logger.info("=== aligning 1ch ===")
+    offset_1ch = _find_offset_xcorr(ref, rec_1ch, search_range_sec, sample_rate)
+
+    aligned_1ch = rec_1ch[offset_1ch:offset_1ch + ref_len]
+    if len(aligned_1ch) < ref_len:
+        aligned_1ch = pad_silence(aligned_1ch, ref_len)
+        logger.warning("1ch recorded audio too short, padded silence at tail")
+
+    # ---- align 4ch independently (correlate on channel-mean) ----
+    logger.info("=== aligning 4ch ===")
+    rec_4ch_mono = rec_4ch.mean(axis=1)
+    offset_4ch = _find_offset_xcorr(ref, rec_4ch_mono, search_range_sec, sample_rate)
+
+    aligned_4ch = rec_4ch[offset_4ch:offset_4ch + ref_len]
+    if len(aligned_4ch) < ref_len:
+        aligned_4ch = pad_silence_mc(aligned_4ch, ref_len)
+        logger.warning("4ch recorded audio too short, padded silence at tail")
+
+    if offset_1ch != offset_4ch:
+        logger.warning(
+            f"1ch/4ch offsets differ: "
+            f"1ch={offset_1ch}({offset_1ch / sample_rate:.3f}s)  "
+            f"4ch={offset_4ch}({offset_4ch / sample_rate:.3f}s)"
+        )
+
+    os.makedirs(os.path.dirname(output_1ch_wav) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(output_4ch_wav) or ".", exist_ok=True)
+
+    sf.write(output_1ch_wav, aligned_1ch, sample_rate)
+    sf.write(output_4ch_wav, aligned_4ch, sample_rate)
+    logger.info(
+        f"aligned 1ch -> {output_1ch_wav}  "
+        f"offset={offset_1ch}({offset_1ch / sample_rate:.3f}s)  "
+        f"dur={len(aligned_1ch) / sample_rate / 3600:.2f}h"
+    )
+    logger.info(
+        f"aligned 4ch -> {output_4ch_wav}  "
+        f"offset={offset_4ch}({offset_4ch / sample_rate:.3f}s)  "
+        f"shape={aligned_4ch.shape}  "
+        f"dur={len(aligned_4ch) / sample_rate / 3600:.2f}h"
+    )
 
 
 def _read_text_items(path: str) -> List[Tuple[str, str]]:
@@ -222,10 +356,12 @@ def parse_args():
     p1.add_argument("--output_dir", required=True)
     p1.add_argument("--sr", type=int, default=24000)
 
-    p2 = sub.add_parser("align", help="Stage 2: align recorded audio")
-    p2.add_argument("--concat_wav", required=True)
-    p2.add_argument("--recorded_wav", required=True)
-    p2.add_argument("--output_wav", required=True)
+    p2 = sub.add_parser("align", help="Stage 2: align recorded PCM audio (1ch + 4ch)")
+    p2.add_argument("--concat_wav", required=True, help="原始拼接WAV (参考音频)")
+    p2.add_argument("--recorded_1ch", required=True, help="录制的单通道16k PCM文件")
+    p2.add_argument("--recorded_4ch", required=True, help="录制的4通道16k PCM文件")
+    p2.add_argument("--output_1ch", required=True, help="对齐后的单通道WAV输出路径")
+    p2.add_argument("--output_4ch", required=True, help="对齐后的4通道WAV输出路径")
     p2.add_argument("--search_range", type=float, default=30.0)
     p2.add_argument("--sr", type=int, default=SAMPLE_RATE)
 
@@ -246,7 +382,8 @@ def main():
         stage1_concat(args.wav_scp, args.text_tn, args.text_itn,
                       args.wav2dur, args.output_dir, args.sr)
     elif args.stage == "align":
-        stage2_align(args.concat_wav, args.recorded_wav, args.output_wav,
+        stage2_align(args.concat_wav, args.recorded_1ch, args.recorded_4ch,
+                     args.output_1ch, args.output_4ch,
                      args.search_range, args.sr)
     elif args.stage == "split":
         stage3_split(args.aligned_wav, args.concat_tn_txt, args.concat_itn_txt,
@@ -264,11 +401,13 @@ if __name__ == "__main__":
 #     --wav2dur data/wav2dur \
 #     --output_dir output/concat
 
-# # Phase 2（不变）
+# # Phase 2（1ch + 4ch PCM 对齐）
 # python run_audio_cat_cut.py align \
 #     --concat_wav output/concat/10s_01.wav \
-#     --recorded_wav recorded/10s_01.wav \
-#     --output_wav output/aligned/10s_01.wav
+#     --recorded_1ch recorded/10s_01_1ch.pcm \
+#     --recorded_4ch recorded/10s_01_4ch.pcm \
+#     --output_1ch output/aligned/10s_01_1ch.wav \
+#     --output_4ch output/aligned/10s_01_4ch.wav
 
 # # Phase 3
 # python run_audio_cat_cut.py split \
