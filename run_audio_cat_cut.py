@@ -309,7 +309,8 @@ def _read_text_items(path: str) -> List[Tuple[str, str]]:
 
 
 def stage3_split(aligned_wav, concat_tn_txt, concat_itn_txt, output_dir,
-                 segment_sec=10.0, sample_rate=SAMPLE_RATE):
+                 segment_sec=10.0, sample_rate=SAMPLE_RATE,
+                 aligned_wav_4ch=None, output_dir_4ch=None):
     audio = load_audio_mono(aligned_wav, sample_rate)
     seg_samples = int(segment_sec * sample_rate)
 
@@ -341,7 +342,46 @@ def stage3_split(aligned_wav, concat_tn_txt, concat_itn_txt, output_dir,
 
     write_text_list(os.path.join(output_dir, f"{base_name}_text_tn.txt"), new_tn)
     write_text_list(os.path.join(output_dir, f"{base_name}_text_itn.txt"), new_itn)
-    logger.info(f"split done: {len(new_tn)} segs -> {output_dir}")
+    logger.info(f"split done (1ch): {len(new_tn)} segs -> {output_dir}")
+
+    if aligned_wav_4ch is not None and output_dir_4ch is not None:
+        audio_4ch, sr = sf.read(aligned_wav_4ch, dtype="float32")
+        if audio_4ch.ndim == 1:
+            audio_4ch = audio_4ch[:, np.newaxis]
+        if sr != sample_rate:
+            raise ValueError(
+                f"4ch WAV sample rate {sr} != expected {sample_rate}"
+            )
+        base_name_4ch = Path(aligned_wav_4ch).stem
+        os.makedirs(output_dir_4ch, exist_ok=True)
+        new_tn_4ch: List[Tuple[str, str]] = []
+        new_itn_4ch: List[Tuple[str, str]] = []
+
+        for idx in range(n_segs):
+            start = idx * seg_samples
+            end = start + seg_samples
+            seg_4ch = audio_4ch[start:end]
+            if len(seg_4ch) < seg_samples:
+                seg_4ch = pad_silence_mc(seg_4ch, seg_samples)
+                logger.warning(f"4ch seg {idx+1} too short, padded")
+            seg_name_4ch = f"{base_name_4ch}_{idx + 1:04d}"
+            sf.write(
+                os.path.join(output_dir_4ch, f"{seg_name_4ch}.wav"),
+                seg_4ch,
+                sample_rate,
+            )
+            new_tn_4ch.append((seg_name_4ch, tn_items[idx][1]))
+            new_itn_4ch.append((seg_name_4ch, itn_items[idx][1]))
+
+        write_text_list(
+            os.path.join(output_dir_4ch, f"{base_name_4ch}_text_tn.txt"),
+            new_tn_4ch,
+        )
+        write_text_list(
+            os.path.join(output_dir_4ch, f"{base_name_4ch}_text_itn.txt"),
+            new_itn_4ch,
+        )
+        logger.info(f"split done (4ch): {len(new_tn_4ch)} segs -> {output_dir_4ch}")
 
 
 def parse_args():
@@ -365,13 +405,15 @@ def parse_args():
     p2.add_argument("--search_range", type=float, default=30.0)
     p2.add_argument("--sr", type=int, default=SAMPLE_RATE)
 
-    p3 = sub.add_parser("split", help="Stage 3: split aligned audio")
-    p3.add_argument("--aligned_wav", required=True)
+    p3 = sub.add_parser("split", help="Stage 3: split aligned audio (1ch + optional 4ch)")
+    p3.add_argument("--aligned_wav", required=True, help="对齐后的单通道WAV")
     p3.add_argument("--concat_tn_txt", required=True, help="Phase1 输出的 *_tn.txt")
     p3.add_argument("--concat_itn_txt", required=True, help="Phase1 输出的 *_itn.txt")
-    p3.add_argument("--output_dir", required=True)
+    p3.add_argument("--output_dir", required=True, help="单通道切分结果输出目录")
     p3.add_argument("--segment_sec", type=float, required=True)
     p3.add_argument("--sr", type=int, default=SAMPLE_RATE)
+    p3.add_argument("--aligned_wav_4ch", default=None, help="对齐后的4通道WAV，指定则同时切分4通道")
+    p3.add_argument("--output_dir_4ch", default=None, help="4通道切分结果输出目录（与 --aligned_wav_4ch 成对使用）")
 
     return parser.parse_args()
 
@@ -386,8 +428,16 @@ def main():
                      args.output_1ch, args.output_4ch,
                      args.search_range, args.sr)
     elif args.stage == "split":
-        stage3_split(args.aligned_wav, args.concat_tn_txt, args.concat_itn_txt,
-                     args.output_dir, args.segment_sec, args.sr)
+        stage3_split(
+            args.aligned_wav,
+            args.concat_tn_txt,
+            args.concat_itn_txt,
+            args.output_dir,
+            args.segment_sec,
+            args.sr,
+            aligned_wav_4ch=args.aligned_wav_4ch,
+            output_dir_4ch=args.output_dir_4ch,
+        )
     else:
         logger.error("please specify stage: concat / align / split")
 
@@ -409,11 +459,13 @@ if __name__ == "__main__":
 #     --output_1ch output/aligned/10s_01_1ch.wav \
 #     --output_4ch output/aligned/10s_01_4ch.wav
 
-# # Phase 3
+# # Phase 3（1ch + 4ch 按拼接时长切分）
 # python run_audio_cat_cut.py split \
-#     --aligned_wav output/aligned/10s_01.wav \
+#     --aligned_wav output/aligned/10s_01_1ch.wav \
 #     --concat_tn_txt output/concat/10s_01_tn.txt \
 #     --concat_itn_txt output/concat/10s_01_itn.txt \
 #     --output_dir output/segments \
-#     --segment_sec 10
+#     --segment_sec 10 \
+#     --aligned_wav_4ch output/aligned/10s_01_4ch.wav \
+#     --output_dir_4ch output/segments_4ch
     main()
