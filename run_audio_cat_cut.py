@@ -282,7 +282,18 @@ def stage2_align(concat_wav, recorded_1ch_pcm, recorded_4ch_pcm,
     os.makedirs(os.path.dirname(output_4ch_wav) or ".", exist_ok=True)
 
     sf.write(output_1ch_wav, aligned_1ch, sample_rate)
-    sf.write(output_4ch_wav, aligned_4ch, sample_rate)
+    audio_int16 = np.ascontiguousarray(
+        (aligned_4ch * 32767).clip(-32768, 32767).astype(np.int16)
+    )
+    # WAV 格式头部用 32-bit 存 chunk size，最大 ~4GB；超出时自动用 RF64
+    data_bytes = audio_int16.shape[0] * audio_int16.shape[1] * audio_int16.dtype.itemsize
+    fmt = "RF64" if data_bytes >= 4 * 1024 ** 3 else "WAV"
+    logger.info(f"4ch data size: {data_bytes / 1024**3:.2f}GB, using {fmt} format")
+    with sf.SoundFile(
+        output_4ch_wav, "w", samplerate=sample_rate, channels=4,
+        subtype="PCM_16", format=fmt,
+    ) as f:
+        f.write(audio_int16)
     logger.info(
         f"aligned 1ch -> {output_1ch_wav}  "
         f"offset={offset_1ch}({offset_1ch / sample_rate:.3f}s)  "
