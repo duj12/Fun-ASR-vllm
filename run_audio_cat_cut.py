@@ -7,6 +7,8 @@ Stage 1: Group by duration -> pad silence -> concat to ~12h audio files
 Stage 2: Align recorded audio with original (cross-correlation offset detection)
 Stage 3: Split aligned audio by original segment duration, restore text
 Stage 4: ASR evaluation on split segments, output WER to Excel
+
+Merged: align_split_asr = Stage 2 + 3 + 4 一气呵成（对齐 -> 切分 -> 转写 WER）
 """
 
 import os
@@ -486,6 +488,77 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
     logger.info(f"ASR 结果已写入: {output_excel} 共 {len(rows)} 条")
 
 
+def run_align_split_asr(
+    concat_wav: str,
+    recorded_1ch: str,
+    recorded_4ch: str,
+    concat_tn_txt: str,
+    concat_itn_txt: str,
+    segment_sec: float,
+    work_dir: str,
+    output_excel: str,
+    search_range_sec: float = 30.0,
+    sample_rate: int = SAMPLE_RATE,
+    text_type: str = "tn",
+    asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+    batch_size: int = 16,
+    device: str = "cuda:0",
+):
+    """合并执行：对齐 -> 切分 -> ASR 转写并输出 WER Excel。
+
+    中间产物：work_dir/aligned/ 下为对齐后的 1ch/4ch WAV；
+             work_dir/segments/、work_dir/segments_4ch/ 下为切分片段与文本。
+    """
+    concat_stem = Path(concat_wav).stem
+    aligned_dir = os.path.join(work_dir, "aligned")
+    segments_dir = os.path.join(work_dir, "segments")
+    segments_dir_4ch = os.path.join(work_dir, "segments_4ch")
+
+    output_1ch = os.path.join(aligned_dir, f"{concat_stem}_1ch.wav")
+    output_4ch = os.path.join(aligned_dir, f"{concat_stem}_4ch.wav")
+
+    logger.info("========== Step 2: 对齐 ==========")
+    stage2_align(
+        concat_wav,
+        recorded_1ch,
+        recorded_4ch,
+        output_1ch,
+        output_4ch,
+        search_range_sec=search_range_sec,
+        sample_rate=sample_rate,
+    )
+
+    logger.info("========== Step 3: 切分 ==========")
+    stage3_split(
+        output_1ch,
+        concat_tn_txt,
+        concat_itn_txt,
+        segments_dir,
+        segment_sec=segment_sec,
+        sample_rate=sample_rate,
+        aligned_wav_4ch=output_4ch,
+        output_dir_4ch=segments_dir_4ch,
+    )
+
+    # 切分后文本：base_name 为对齐 1ch 的 stem，即 {concat_stem}_1ch
+    base_name_1ch = Path(output_1ch).stem
+    if text_type == "itn":
+        text_file = os.path.join(segments_dir, f"{base_name_1ch}_text_itn.txt")
+    else:
+        text_file = os.path.join(segments_dir, f"{base_name_1ch}_text_tn.txt")
+
+    logger.info("========== Step 4: ASR 转写与 WER ==========")
+    stage4_asr_eval(
+        segments_dir,
+        text_file,
+        output_excel,
+        asr_model=asr_model,
+        batch_size=batch_size,
+        device=device,
+    )
+    logger.info("合并流程完成: 对齐 -> 切分 -> 转写 -> %s", output_excel)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Audio concat and split tool")
     sub = parser.add_subparsers(dest="stage")
@@ -525,6 +598,25 @@ def parse_args():
     p4.add_argument("--batch_size", type=int, default=16, help="Qwen3-ASR 批推理大小，默认 16")
     p4.add_argument("--device", default="cuda:0", help="推理使用的 GPU，如 cuda:0 / cuda:1，避免多卡时张量设备不一致")
 
+    p_merge = sub.add_parser(
+        "align_split_asr",
+        help="合并执行: 对齐(2) -> 切分(3) -> ASR转写(4)，中间结果落在 --work_dir",
+    )
+    p_merge.add_argument("--concat_wav", required=True, help="原始拼接 WAV（参考音频）")
+    p_merge.add_argument("--recorded_1ch", required=True, help="录制的单通道 16k PCM")
+    p_merge.add_argument("--recorded_4ch", required=True, help="录制的 4 通道 16k PCM")
+    p_merge.add_argument("--concat_tn_txt", required=True, help="Stage1 输出的 *_tn.txt")
+    p_merge.add_argument("--concat_itn_txt", required=True, help="Stage1 输出的 *_itn.txt")
+    p_merge.add_argument("--segment_sec", type=float, required=True, help="每段时长（秒），与 Stage1 分组一致，如 10")
+    p_merge.add_argument("--work_dir", required=True, help="工作目录：aligned/、segments/、segments_4ch/ 将在此下生成")
+    p_merge.add_argument("--output_excel", required=True, help="最终 WER 结果 Excel 路径（.xlsx）")
+    p_merge.add_argument("--search_range", type=float, default=30.0, help="对齐搜索范围（秒）")
+    p_merge.add_argument("--sr", type=int, default=SAMPLE_RATE)
+    p_merge.add_argument("--text_type", choices=("tn", "itn"), default="tn", help="ASR 用哪类文本算 WER，默认 tn")
+    p_merge.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B")
+    p_merge.add_argument("--batch_size", type=int, default=16)
+    p_merge.add_argument("--device", default="cuda:0")
+
     return parser.parse_args()
 
 
@@ -557,8 +649,25 @@ def main():
             batch_size=args.batch_size,
             device=args.device,
         )
+    elif args.stage == "align_split_asr":
+        run_align_split_asr(
+            args.concat_wav,
+            args.recorded_1ch,
+            args.recorded_4ch,
+            args.concat_tn_txt,
+            args.concat_itn_txt,
+            args.segment_sec,
+            args.work_dir,
+            args.output_excel,
+            search_range_sec=args.search_range,
+            sample_rate=args.sr,
+            text_type=args.text_type,
+            asr_model=args.asr_model,
+            batch_size=args.batch_size,
+            device=args.device,
+        )
     else:
-        logger.error("please specify stage: concat / align / split / asr_eval")
+        logger.error("please specify stage: concat / align / split / asr_eval / align_split_asr")
 
 
 if __name__ == "__main__":
@@ -592,5 +701,16 @@ if __name__ == "__main__":
 # python run_audio_cat_cut.py asr_eval \
 #     --segments_dir output/segments \
 #     --text_file output/segments/10s_01_ch1_text_tn.txt \
+#     --output_excel output/asr_wer_10s_01.xlsx
+#
+# # 合并：对齐 + 切分 + 转写（一步跑完 2/3/4）
+# python run_audio_cat_cut.py align_split_asr \
+#     --concat_wav output/concat/10s_01.wav \
+#     --recorded_1ch recorded/10s_01_1ch.pcm \
+#     --recorded_4ch recorded/10s_01_4ch.pcm \
+#     --concat_tn_txt output/concat/10s_01_tn.txt \
+#     --concat_itn_txt output/concat/10s_01_itn.txt \
+#     --segment_sec 10 \
+#     --work_dir output/pipeline_10s_01 \
 #     --output_excel output/asr_wer_10s_01.xlsx
     main()
