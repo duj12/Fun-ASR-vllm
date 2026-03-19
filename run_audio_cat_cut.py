@@ -10,7 +10,6 @@ Stage 4: ASR evaluation on split segments, output WER to Excel
 """
 
 import os
-import sys
 import argparse
 import logging
 import numpy as np
@@ -397,43 +396,83 @@ def stage3_split(aligned_wav, concat_tn_txt, concat_itn_txt, output_dir,
         logger.info(f"split done (4ch): {len(new_tn_4ch)} segs -> {output_dir_4ch}")
 
 
-def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str):
-    """Stage 4: 对切分后的音频做 ASR 识别，计算 WER，写入 Excel（wav_name, text, asr, wer）。"""
+def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
+                   asr_model: str = "Qwen/Qwen3-ASR-1.7B", batch_size: int = 16,
+                   device: str = "cuda:0"):
+    """Stage 4: 使用 Qwen3-ASR 对切分音频做识别（支持 batch），用 compute_wer_line 算 WER，写入 Excel（wav_name, text, asr, wer）。"""
     try:
         import openpyxl
     except ImportError:
         raise ImportError("stage4 需要 openpyxl，请执行: pip install openpyxl")
 
-    # ASR_Checker 内部会调用 ASR_client_api.parse_args() 解析 sys.argv，会与本脚本参数冲突，故临时还原 argv
-    _argv = sys.argv
     try:
-        sys.argv = [sys.argv[0]]
-        from asr_check import ASR_Checker
-        asr_checker = ASR_Checker()
-    finally:
-        sys.argv = _argv
+        from qwen_asr import Qwen3ASRModel
+    except ImportError:
+        raise ImportError("stage4 使用 Qwen3-ASR 需安装 qwen_asr，请按项目说明安装")
+
+    from asr_check import determine_lang
+    from compute_wer_line import compute_wer_line
 
     items = _read_text_items(text_file)
     if not items:
         logger.warning("text_file 为空，未生成任何结果")
         return
-    rows = []
+
+    lang_map = {"zh": "Chinese", "en": "English"}
+    # 预扫：有效条目 (items 下标, wav_name, text, audio_path, language)；缺失的先填行
+    rows = [None] * len(items)
+    valid_list = []
     for i, (wav_name, text) in enumerate(items):
         audio_path = os.path.join(segments_dir, f"{wav_name}.wav")
         if not os.path.isfile(audio_path):
             logger.warning(f"跳过缺失音频: {audio_path}")
-            rows.append({"wav_name": wav_name, "text": text, "asr": "", "wer": ""})
+            rows[i] = {"wav_name": wav_name, "text": text, "asr": "", "wer": ""}
             continue
+        lang_code = determine_lang(text)
+        language = lang_map.get(lang_code, "Chinese")
+        valid_list.append((i, wav_name, text, audio_path, language))
+
+    if not valid_list:
+        logger.warning("没有可用的音频文件，未生成结果")
+        return
+
+    # 使用单卡避免 device_map="auto" 把模型拆到多卡导致 tensor 设备不一致
+    logger.info(f"加载 ASR 模型: {asr_model}，batch_size={batch_size}，device={device}")
+    asr_model_obj = Qwen3ASRModel.from_pretrained(
+        asr_model,
+        device_map=device,
+        max_inference_batch_size=max(batch_size, 32),
+        max_new_tokens=256,
+    )
+
+    # 按 batch 推理，每推理完一个 batch 立即算该 batch 的 WER 并填入 rows
+    n_valid = len(valid_list)
+    for start in range(0, n_valid, batch_size):
+        batch = valid_list[start : start + batch_size]
+        paths = [x[3] for x in batch]
+        langs = [x[4] for x in batch]
         try:
-            result = asr_checker.check(text, audio_path)
-            asr = result.get("asr_text", "")
-            wer = result.get("stats", {}).get("wer", float("nan"))
+            batch_results = asr_model_obj.transcribe(
+                audio=paths,
+                language=langs,
+                return_time_stamps=False,
+            )
+            for k, (idx, wav_name, text, _path, _lang) in enumerate(batch):
+                asr = batch_results[k].text if k < len(batch_results) and batch_results[k] else ""
+                try:
+                    wer_result = compute_wer_line(text, asr, tochar=True, verbose=1)
+                    wer = wer_result["stats"]["wer"]
+                except Exception:
+                    wer = float("nan")
+                rows[idx] = {"wav_name": wav_name, "text": text, "asr": asr, "wer": wer}
         except Exception as e:
-            logger.warning(f"{wav_name} ASR 失败: {e}")
-            asr, wer = "", float("nan")
-        rows.append({"wav_name": wav_name, "text": text, "asr": asr, "wer": wer})
-        if (i + 1) % 50 == 0:
-            logger.info(f"已处理 {i + 1}/{len(items)} 条")
+            logger.warning(f"batch {start}-{start + len(batch)} 推理失败: {e}")
+            for idx, wav_name, text, _path, _lang in batch:
+                rows[idx] = {"wav_name": wav_name, "text": text, "asr": "", "wer": float("nan")}
+        if (start + len(batch)) % (batch_size * 10) == 0 or start + len(batch) == n_valid:
+            logger.info(f"已推理 {min(start + len(batch), n_valid)}/{n_valid} 条")
+
+    rows = [r for r in rows if r is not None]
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -478,10 +517,13 @@ def parse_args():
     p3.add_argument("--aligned_wav_4ch", default=None, help="对齐后的4通道WAV，指定则同时切分4通道")
     p3.add_argument("--output_dir_4ch", default=None, help="4通道切分结果输出目录（与 --aligned_wav_4ch 成对使用）")
 
-    p4 = sub.add_parser("asr_eval", help="Stage 4: 对切分音频做 ASR 识别与 WER，输出 Excel")
+    p4 = sub.add_parser("asr_eval", help="Stage 4: 使用 Qwen3-ASR-1.7B 识别切分音频并算 WER，输出 Excel")
     p4.add_argument("--segments_dir", required=True, help="Stage3 切分结果目录（含 wav 与对应 text 文件所在目录）")
     p4.add_argument("--text_file", required=True, help="切分文本列表，格式: segment_id\\ttext（如 *_text_tn.txt）")
     p4.add_argument("--output_excel", required=True, help="输出 Excel 路径（.xlsx），列: wav_name, text, asr, wer")
+    p4.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR 模型名称，默认 Qwen3-ASR-1.7B")
+    p4.add_argument("--batch_size", type=int, default=16, help="Qwen3-ASR 批推理大小，默认 16")
+    p4.add_argument("--device", default="cuda:0", help="推理使用的 GPU，如 cuda:0 / cuda:1，避免多卡时张量设备不一致")
 
     return parser.parse_args()
 
@@ -507,7 +549,14 @@ def main():
             output_dir_4ch=args.output_dir_4ch,
         )
     elif args.stage == "asr_eval":
-        stage4_asr_eval(args.segments_dir, args.text_file, args.output_excel)
+        stage4_asr_eval(
+            args.segments_dir,
+            args.text_file,
+            args.output_excel,
+            asr_model=args.asr_model,
+            batch_size=args.batch_size,
+            device=args.device,
+        )
     else:
         logger.error("please specify stage: concat / align / split / asr_eval")
 
