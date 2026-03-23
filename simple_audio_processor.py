@@ -124,6 +124,37 @@ def package_passes_filter(
     return start_d <= date_int <= end_d
 
 
+def normalize_user_path(path: Union[str, os.PathLike]) -> str:
+    """
+    规范化用户输入的目录/文件路径，便于在 Windows 下使用。
+
+    - 支持 ``D:\\dir``、``D:/dir``、混合斜杠、路径首尾多余引号
+    - 展开 ``~`` / ``~user``（expanduser）
+    - 转为绝对路径并解析 ``.`` / ``..``（pathlib resolve）
+
+    说明：``--package_filter`` 等不含盘符的参数字段勿用本函数；仅用于 ``--data_dir`` / ``--output_dir`` 等路径类参数。
+    """
+    if path is None:
+        return ""
+    p = os.fspath(path).strip()
+    if not p:
+        return p
+    # 复制路径时偶发带上的成对引号
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+        p = p[1:-1].strip()
+    p = os.path.expanduser(p)
+    try:
+        rp = Path(p)
+        try:
+            resolved = rp.resolve(strict=False)
+        except TypeError:
+            # Python < 3.9 无 strict 参数
+            resolved = rp.resolve()
+        return os.fspath(resolved)
+    except (OSError, ValueError, RuntimeError):
+        return os.path.normpath(os.path.abspath(p))
+
+
 class VADModelWrapper:
     """VAD模型包装器，支持多种VAD模型"""
     
@@ -1172,6 +1203,9 @@ class SimpleAudioProcessor:
         Returns:
             List[Dict]: 所有转写结果
         """
+        data_directory = normalize_user_path(data_directory)
+        output_directory = normalize_user_path(output_directory)
+
         zip_files = list(Path(data_directory).glob("*.zip"))
         self.stats['zip_files_total'] = len(zip_files)
         logger.info(f"发现 {len(zip_files)} 个压缩包")
@@ -1333,6 +1367,10 @@ def main():
     )
     
     args = parser.parse_args()
+
+    # 统一规范化路径（兼容 Windows 盘符、反斜杠/正斜杠、首尾引号等）
+    args.data_dir = normalize_user_path(args.data_dir)
+    args.output_dir = normalize_user_path(args.output_dir)
     
     os.makedirs(args.output_dir, exist_ok=True)
     # 与 audio/ 并列：各压缩包产物目录的根
@@ -1425,6 +1463,10 @@ def main():
 #        --package_filter 另一设备ID:20260201:20260228
 #
 #    Linux/macOS 可把续行符 ^ 换成反斜杠 \ 或写成一行。
+#
+#    Windows 路径：支持盘符与反斜杠，例如 --data_dir D:\data\zips --output_dir D:\out\run1
+#    路径含空格时请加引号：--data_dir "D:\My Data\zips"
+#    （程序会对路径做规范化；--package_filter 仍为 设备ID:日期:日期，不要用本格式传 Windows 路径）
 #
 # 4) 禁用转写结果筛选、保留空文件夹、不汇总 wav 到 audio 目录：
 #
