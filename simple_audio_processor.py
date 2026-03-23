@@ -18,7 +18,7 @@ import soundfile as sf
 import re
 import shutil
 from pathlib import Path
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 from qwen_asr import Qwen3ASRModel
 from funasr import AutoModel
 
@@ -43,6 +43,85 @@ try:
 except ImportError:
     FIRERED_VAD_AVAILABLE = False
     logger.warning("FireRedVad 未安装，将使用默认的 fsmn-vad 模型")
+
+
+def parse_package_stem_device_and_date(package_stem: str) -> Optional[Tuple[str, int]]:
+    """
+    从压缩包/目录名（无扩展名）解析设备 ID 与日期。
+
+    约定格式: {设备号}_{yyyyMMddHHmmss}_...，例如 1d84fff26301c74_20260130090901_0000
+    日期取第二段的前 8 位 yyyyMMdd，转为整数便于区间比较。
+
+    Returns:
+        (device_id, yyyymmdd) 或解析失败返回 None
+    """
+    parts = package_stem.split("_")
+    if len(parts) < 2:
+        return None
+    device_id = parts[0]
+    ts_part = parts[1]
+    if len(ts_part) < 8 or not ts_part[:8].isdigit():
+        return None
+    date_int = int(ts_part[:8])
+    return device_id, date_int
+
+
+def merge_package_filter_ranges(
+    entries: List[Tuple[str, int, int]]
+) -> Dict[str, Tuple[int, int]]:
+    """
+    合并多个设备的日期范围；同一设备多次出现时取并集（最小起始日、最大结束日）。
+    """
+    merged: Dict[str, Tuple[int, int]] = {}
+    for device_id, start_d, end_d in entries:
+        if device_id in merged:
+            s0, e0 = merged[device_id]
+            merged[device_id] = (min(s0, start_d), max(e0, end_d))
+        else:
+            merged[device_id] = (start_d, end_d)
+    return merged
+
+
+def parse_package_filter_cli(specs: List[str]) -> Dict[str, Tuple[int, int]]:
+    """
+    解析命令行 --package_filter 参数列表。
+    每项格式: 设备ID:起始日期YYYYMMDD:结束日期YYYYMMDD（起止均包含）。
+    """
+    entries: List[Tuple[str, int, int]] = []
+    for spec in specs:
+        spec = spec.strip()
+        if not spec:
+            continue
+        parts = spec.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"无效的 package_filter 格式: {spec!r}，应为 设备ID:YYYYMMDD:YYYYMMDD"
+            )
+        device_id, start_s, end_s = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if len(start_s) != 8 or len(end_s) != 8 or not start_s.isdigit() or not end_s.isdigit():
+            raise ValueError(
+                f"日期须为 8 位 YYYYMMDD: {spec!r}"
+            )
+        start_d, end_d = int(start_s), int(end_s)
+        if start_d > end_d:
+            raise ValueError(f"起始日期不能晚于结束日期: {spec!r}")
+        entries.append((device_id, start_d, end_d))
+    return merge_package_filter_ranges(entries)
+
+
+def package_passes_filter(
+    package_stem: str,
+    device_date_ranges: Dict[str, Tuple[int, int]],
+) -> bool:
+    """若 package 的设备与日期落在任一允许范围内则返回 True。"""
+    parsed = parse_package_stem_device_and_date(package_stem)
+    if parsed is None:
+        return False
+    device_id, date_int = parsed
+    if device_id not in device_date_ranges:
+        return False
+    start_d, end_d = device_date_ranges[device_id]
+    return start_d <= date_int <= end_d
 
 
 class VADModelWrapper:
@@ -485,7 +564,9 @@ class SimpleAudioProcessor:
             'final_results': 0,     # 新增：最终保留的结果数
             'original_total_duration': 0.0,  # 原始长音频总时长
             'final_total_duration': 0.0,     # 最终保留音频总时长
-            'effective_ratio': 0.0           # 有效数据比例
+            'effective_ratio': 0.0,           # 有效数据比例
+            'zip_files_total': 0,             # 目录下发现的 zip 总数
+            'packages_skipped_filter': 0,     # 因设备/日期过滤跳过的包数
         }
     
     def load_pcm_audio(self, pcm_path: str, source_channels=2, target_channels: int = 1) -> np.ndarray:
@@ -793,13 +874,14 @@ class SimpleAudioProcessor:
         
         Args:
             package_path: 压缩包路径
-            output_base_dir: 输出基础目录
+            output_base_dir: 输出根目录；每个包的处理结果写入 ``{output_base_dir}/processed/{package_name}/``
             
         Returns:
             tuple[List[Dict], str]: (转写结果列表, 处理后的文件夹路径)
         """
         package_name = Path(package_path).stem
-        work_dir = os.path.join(output_base_dir, package_name)
+        # 与 output_dir/audio（汇总复制）并列，便于多设备、多批次统一管理
+        work_dir = os.path.join(output_base_dir, "processed", package_name)
         os.makedirs(work_dir, exist_ok=True)
         
         transcription_results = []
@@ -968,11 +1050,11 @@ class SimpleAudioProcessor:
     
     def consolidate_audio_files(self, results: List[Dict], output_dir: str) -> str:
         """
-        将所有保留的音频文件移动到统一的文件夹中
+        将所有保留的音频文件复制到统一目录 ``{output_dir}/audio/``（与 ``processed/`` 同级）。
         
         Args:
             results: 处理结果列表
-            output_dir: 输出目录
+            output_dir: 输出根目录
             
         Returns:
             str: 统一音频文件夹路径
@@ -1023,6 +1105,8 @@ class SimpleAudioProcessor:
         report = {
             'summary': {
                 'total_packages': self.stats['total_packages'],
+                'zip_files_total': self.stats.get('zip_files_total', self.stats['total_packages']),
+                'packages_skipped_filter': self.stats.get('packages_skipped_filter', 0),
                 'total_processed_audios': self.stats['processed_audios'],
                 'successful_transcriptions': self.stats['successful_transcriptions'],
                 'failed_transcriptions': self.stats['failed_transcriptions'],
@@ -1069,29 +1153,56 @@ class SimpleAudioProcessor:
                      output_directory: str,
                      show_progress: bool = True,
                      remove_empty_folders: bool = True,
-                     consolidate_audio: bool = True) -> List[Dict]:
+                     consolidate_audio: bool = True,
+                     package_filter: Optional[Dict[str, Tuple[int, int]]] = None) -> List[Dict]:
         """
         批量处理所有音频包
         
         Args:
             data_directory: 数据目录
-            output_directory: 输出目录
+            output_directory: 输出根目录；每包处理结果在 ``processed/<包名>/``，报告与 Excel 在根目录；
+                若 consolidate_audio 为 True，还会将保留的 wav 复制到 ``audio/``（与 processed 同级）
             show_progress: 是否显示进度
             remove_empty_folders: 是否删除空文件夹
-            consolidate_audio: 是否整理音频文件到统一文件夹
+            consolidate_audio: 是否将保留的 wav 复制到 ``{output_directory}/audio/``
+            package_filter: 可选。设备 ID -> (起始日期YYYYMMDD, 结束日期YYYYMMDD)（含首尾）。
+                仅处理名称形如「设备号_yyyyMMddHHmmss_...」且设备与日期落在范围内的 zip；
+                为 None 时处理目录下全部 zip。
             
         Returns:
             List[Dict]: 所有转写结果
         """
         zip_files = list(Path(data_directory).glob("*.zip"))
+        self.stats['zip_files_total'] = len(zip_files)
         logger.info(f"发现 {len(zip_files)} 个压缩包")
-        
-        self.stats['total_packages'] = len(zip_files)
+
+        if package_filter:
+            logger.info(
+                f"已启用包名过滤（设备+日期）: {package_filter}"
+            )
+
+        # 仅对待处理的 zip 建进度条
+        to_process: List[Path] = []
+        for z in zip_files:
+            stem = z.stem
+            if package_filter is not None:
+                if not package_passes_filter(stem, package_filter):
+                    self.stats['packages_skipped_filter'] += 1
+                    logger.info(f"跳过（不符合过滤条件）: {z.name}")
+                    continue
+            to_process.append(z)
+
+        self.stats['total_packages'] = len(to_process)
+        logger.info(
+            f"将处理 {len(to_process)} 个包"
+            + (f"，已跳过 {self.stats['packages_skipped_filter']} 个" if package_filter else "")
+        )
+
         all_results = []
         processed_folders = []  # 记录处理过的文件夹路径
         
         from tqdm import tqdm
-        iterator = tqdm(zip_files, desc="处理音频包") if show_progress else zip_files
+        iterator = tqdm(to_process, desc="处理音频包") if show_progress else to_process
         
         for zip_file in iterator:
             logger.info(f"处理: {zip_file.name}")
@@ -1209,9 +1320,23 @@ def main():
     parser.add_argument("--min_chars", type=int, default=2, help="无标点时的最小字符数")
     parser.add_argument("--similarity", type=float, default=0.6, help="文本相似度阈值")
     
+    # 仅处理指定设备与日期范围内的包（zip 文件名无扩展名须为 设备号_yyyyMMddHHmmss_...）
+    parser.add_argument(
+        "--package_filter",
+        action="append",
+        default=None,
+        metavar="DEVICE:START:END",
+        help=(
+            "只处理匹配的包，可多次指定。格式: 设备ID:起始日期YYYYMMDD:结束日期YYYYMMDD（起止均包含）。"
+            "例: --package_filter 1d84fff26301c74:20260205:20260210"
+        ),
+    )
+    
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
+    # 与 audio/ 并列：各压缩包产物目录的根
+    os.makedirs(os.path.join(args.output_dir, "processed"), exist_ok=True)
     
     # 检查FireRedVad可用性
     if args.vad_model.lower() == "fireredvad" and not FIRERED_VAD_AVAILABLE:
@@ -1229,13 +1354,22 @@ def main():
         similarity_threshold=args.similarity
     )
     
+    package_filter = None
+    if args.package_filter:
+        try:
+            package_filter = parse_package_filter_cli(args.package_filter)
+        except ValueError as e:
+            logger.error(f"package_filter 解析失败: {e}")
+            return
+    
     # 批量处理
     results = processor.batch_process(
         data_directory=args.data_dir,
         output_directory=args.output_dir,
         show_progress=not args.no_progress,
         remove_empty_folders=not args.keep_empty,
-        consolidate_audio=not args.no_consolidate
+        consolidate_audio=not args.no_consolidate,
+        package_filter=package_filter,
     )
     
     # 保存结果到Excel
@@ -1244,10 +1378,16 @@ def main():
     
     logger.info("批量处理完成!")
     logger.info(f"Excel结果文件: {excel_path}")
+    if package_filter is not None:
+        logger.info(
+            f"包过滤: 发现 zip {processor.stats.get('zip_files_total', 0)} 个，"
+            f"跳过 {processor.stats.get('packages_skipped_filter', 0)} 个，"
+            f"实际处理 {processor.stats.get('total_packages', 0)} 个"
+        )
     if not args.keep_empty:
         logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
     if not args.no_consolidate:
-        logger.info("音频文件已整理到 consolidated_audio 文件夹")
+        logger.info(f"保留音频已复制到: {os.path.join(args.output_dir, 'audio')}")
     
     # 显示筛选统计信息
     if not args.disable_filter:
@@ -1262,6 +1402,36 @@ def main():
     # 显示使用的VAD模型信息
     logger.info(f"使用的VAD模型: {processor.vad_wrapper.model_type}")
 
-
+# -----------------------------------------------------------------------------
+# 使用方法示例（命令行，在 Fun-ASR-vllm 目录下执行）
+# -----------------------------------------------------------------------------
+#
+# 1) 基本：处理 --data_dir 下全部 *.zip，结果写到 --output_dir：
+#    - processed/<包名>/  各压缩包解压、切分 wav、jsonl 等（按包分目录）
+#    - transcription_results.xlsx、processing_summary.json 在输出根目录
+#    - 若未加 --no_consolidate，筛选保留的 wav 会再复制一份到 输出目录/audio/（与 processed 同级，便于跨设备汇总）
+#
+#    python simple_audio_processor.py --data_dir ./data --output_dir ./simple_results
+#
+# 2) 指定 GPU、VAD、关闭 tqdm 进度条：
+#
+#    python simple_audio_processor.py --data_dir ./data --output_dir ./out --device cuda:0 --vad_model fsmn-vad --no_progress
+#
+# 3) 仅处理「指定设备 + 日期范围内」的 zip（包名无扩展名须为：设备号_yyyyMMddHHmmss_...）
+#    日期为 8 位 YYYYMMDD，起止均包含。可多次 --package_filter，多设备各写一条：
+#
+#    python simple_audio_processor.py --data_dir ./data --output_dir ./out ^
+#        --package_filter 1d84fff26301c74:20260205:20260210 ^
+#        --package_filter 另一设备ID:20260201:20260228
+#
+#    Linux/macOS 可把续行符 ^ 换成反斜杠 \ 或写成一行。
+#
+# 4) 禁用转写结果筛选、保留空文件夹、不汇总 wav 到 audio 目录：
+#
+#    python simple_audio_processor.py --data_dir ./data --output_dir ./out --disable_filter --keep_empty --no_consolidate
+#
+# -----------------------------------------------------------------------------
+# 实例：
+# python simple_audio_processor.py --data_dir /mnt/x_disk/xMovRDprojs/TTSA/ASR/大屏数据-瓦力/原始数据/20260210/ --output_dir /mnt/x_disk/xMovRDprojs/TTSA/ASR/大屏采集数据处理/20260210_4 --package_filter 746a9e6da86feb4a:20260207:20260207 --package_filter 798a3df7b99bf98d:20260207:20260210 --package_filter 906defbe071b417a:20260208:20260210
 if __name__ == "__main__":
     main()
