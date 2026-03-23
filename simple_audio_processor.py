@@ -1216,22 +1216,26 @@ class SimpleAudioProcessor:
                 f"已启用包名过滤（设备+日期）: {package_filter}"
             )
 
-        # 仅对待处理的 zip 建进度条
+        # 仅对待处理的 zip 建进度条（开启筛选时不逐条打印被过滤掉的包）
         to_process: List[Path] = []
         for z in zip_files:
             stem = z.stem
             if package_filter is not None:
                 if not package_passes_filter(stem, package_filter):
                     self.stats['packages_skipped_filter'] += 1
-                    logger.info(f"跳过（不符合过滤条件）: {z.name}")
                     continue
             to_process.append(z)
 
         self.stats['total_packages'] = len(to_process)
-        logger.info(
-            f"将处理 {len(to_process)} 个包"
-            + (f"，已跳过 {self.stats['packages_skipped_filter']} 个" if package_filter else "")
-        )
+        if package_filter is not None:
+            if to_process:
+                logger.info(f"符合筛选条件，将处理 {len(to_process)} 个压缩包:")
+                for z in to_process:
+                    logger.info(f"  {z.name}")
+            else:
+                logger.warning("符合筛选条件的压缩包: 无（请检查设备号、日期范围与 zip 命名）")
+        else:
+            logger.info(f"将处理 {len(to_process)} 个包")
 
         all_results = []
         processed_folders = []  # 记录处理过的文件夹路径
@@ -1240,7 +1244,11 @@ class SimpleAudioProcessor:
         iterator = tqdm(to_process, desc="处理音频包") if show_progress else to_process
         
         for zip_file in iterator:
-            logger.info(f"处理: {zip_file.name}")
+            # 开启筛选时已在上方列出命中压缩包，此处不再重复 info 打印
+            if package_filter is not None:
+                logger.debug(f"处理: {zip_file.name}")
+            else:
+                logger.info(f"处理: {zip_file.name}")
             package_results, folder_path = self.process_single_audio_package(str(zip_file), output_directory)
             all_results.extend(package_results)
             processed_folders.append((folder_path, len(package_results)))  # 保存文件夹路径和结果数量
@@ -1419,9 +1427,7 @@ def main():
     logger.info(f"Excel结果文件: {excel_path}")
     if package_filter is not None:
         logger.info(
-            f"包过滤: 发现 zip {processor.stats.get('zip_files_total', 0)} 个，"
-            f"跳过 {processor.stats.get('packages_skipped_filter', 0)} 个，"
-            f"实际处理 {processor.stats.get('total_packages', 0)} 个"
+            f"包过滤: 实际处理 {processor.stats.get('total_packages', 0)} 个压缩包"
         )
     if not args.keep_empty:
         logger.info(f"已清理 {processor.stats['empty_folders_removed']} 个空文件夹")
