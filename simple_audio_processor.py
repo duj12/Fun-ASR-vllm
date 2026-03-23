@@ -1103,8 +1103,9 @@ class SimpleAudioProcessor:
                 target_path = os.path.join(consolidated_dir, filename)
                 
                 try:
-                    # 复制文件而不是移动，保留原始文件
-                    shutil.copy2(source_path, target_path)
+                    # 仅用 copyfile 复制内容；不用 copy2，避免在 SMB/云盘/部分文件系统上
+                    # 因 copystat 设置时间戳失败而报 Errno 1（文件已写完但元数据不允许）
+                    shutil.copyfile(source_path, target_path)
                     moved_count += 1
                     logger.debug(f"已复制: {filename}")
                 except Exception as e:

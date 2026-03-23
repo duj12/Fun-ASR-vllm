@@ -8,17 +8,18 @@ Stage 2: Align recorded audio with original (cross-correlation offset detection)
 Stage 3: Split aligned audio by original segment duration, restore text
 Stage 4: ASR evaluation on split segments, output WER to Excel
 
-Merged: align_split_asr = Stage 2 + 3 + 4 一气呵成（对齐 -> 切分 -> 转写 WER）
+Merged: align_split_asr = Stage 2 + 3 + 4（1ch 与 4ch 各输出切分目录与 WER Excel）
 """
 
 import os
 import argparse
 import logging
+import tempfile
 import numpy as np
 import soundfile as sf
 import librosa
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Any
 
 logging.basicConfig(
     level=logging.INFO,
@@ -398,10 +399,44 @@ def stage3_split(aligned_wav, concat_tn_txt, concat_itn_txt, output_dir,
         logger.info(f"split done (4ch): {len(new_tn_4ch)} segs -> {output_dir_4ch}")
 
 
+def _mono_wav_for_asr(
+    audio_path: str, multichannel_downmix: bool
+) -> Tuple[str, bool]:
+    """若需对多声道做 ASR，先下混为单声道临时 WAV。
+
+    返回 (供 transcribe 使用的路径, 是否为需删除的临时文件)。
+    Qwen3-ASR 等模型通常只接受单声道输入。
+    """
+    if not multichannel_downmix:
+        return audio_path, False
+    try:
+        info = sf.info(audio_path)
+    except OSError as e:
+        logger.warning(f"无法读取音频信息 {audio_path}: {e}")
+        return audio_path, False
+    if info.channels <= 1:
+        return audio_path, False
+    data, sr = sf.read(audio_path, dtype="float32")
+    if data.ndim == 1:
+        return audio_path, False
+    mono = np.mean(data, axis=1)
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="asr_mono_")
+    os.close(fd)
+    sf.write(tmp_path, mono, sr)
+    return tmp_path, True
+
+
 def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
                    asr_model: str = "Qwen/Qwen3-ASR-1.7B", batch_size: int = 16,
-                   device: str = "cuda:0"):
-    """Stage 4: 使用 Qwen3-ASR 对切分音频做识别（支持 batch），用 compute_wer_line 算 WER，写入 Excel（wav_name, text, asr, wer）。"""
+                   device: str = "cuda:0",
+                   multichannel_downmix: bool = False,
+                   preloaded_asr_model: Optional[Any] = None) -> Optional[Any]:
+    """Stage 4: 使用 Qwen3-ASR 对切分音频做识别（支持 batch），用 compute_wer_line 算 WER，写入 Excel（wav_name, text, asr, wer）。
+
+    multichannel_downmix: 为 True 时对多声道 WAV 先按通道平均下混为单声道再识别（4 通道切分片段需要）。
+    preloaded_asr_model: 若传入则不再加载模型（合并流程中 1ch/4ch 共用一个模型）。
+    返回本次推理使用的 ASR 模型对象（便于调用方复用）；未加载或未跑完则返回 None。
+    """
     try:
         import openpyxl
     except ImportError:
@@ -418,7 +453,7 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
     items = _read_text_items(text_file)
     if not items:
         logger.warning("text_file 为空，未生成任何结果")
-        return
+        return None
 
     lang_map = {"zh": "Chinese", "en": "English"}
     # 预扫：有效条目 (items 下标, wav_name, text, audio_path, language)；缺失的先填行
@@ -436,23 +471,34 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
 
     if not valid_list:
         logger.warning("没有可用的音频文件，未生成结果")
-        return
+        return None
 
     # 使用单卡避免 device_map="auto" 把模型拆到多卡导致 tensor 设备不一致
-    logger.info(f"加载 ASR 模型: {asr_model}，batch_size={batch_size}，device={device}")
-    asr_model_obj = Qwen3ASRModel.from_pretrained(
-        asr_model,
-        device_map=device,
-        max_inference_batch_size=max(batch_size, 32),
-        max_new_tokens=256,
-    )
+    if preloaded_asr_model is not None:
+        asr_model_obj = preloaded_asr_model
+        logger.info("复用已加载的 ASR 模型进行推理")
+    else:
+        logger.info(f"加载 ASR 模型: {asr_model}，batch_size={batch_size}，device={device}")
+        asr_model_obj = Qwen3ASRModel.from_pretrained(
+            asr_model,
+            device_map=device,
+            max_inference_batch_size=max(batch_size, 32),
+            max_new_tokens=256,
+        )
 
     # 按 batch 推理，每推理完一个 batch 立即算该 batch 的 WER 并填入 rows
     n_valid = len(valid_list)
     for start in range(0, n_valid, batch_size):
         batch = valid_list[start : start + batch_size]
-        paths = [x[3] for x in batch]
+        paths_raw = [x[3] for x in batch]
         langs = [x[4] for x in batch]
+        temp_paths: List[str] = []
+        paths: List[str] = []
+        for p in paths_raw:
+            use_p, is_temp = _mono_wav_for_asr(p, multichannel_downmix)
+            paths.append(use_p)
+            if is_temp:
+                temp_paths.append(use_p)
         try:
             batch_results = asr_model_obj.transcribe(
                 audio=paths,
@@ -471,6 +517,12 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
             logger.warning(f"batch {start}-{start + len(batch)} 推理失败: {e}")
             for idx, wav_name, text, _path, _lang in batch:
                 rows[idx] = {"wav_name": wav_name, "text": text, "asr": "", "wer": float("nan")}
+        finally:
+            for tp in temp_paths:
+                try:
+                    os.unlink(tp)
+                except OSError:
+                    pass
         if (start + len(batch)) % (batch_size * 10) == 0 or start + len(batch) == n_valid:
             logger.info(f"已推理 {min(start + len(batch), n_valid)}/{n_valid} 条")
 
@@ -486,6 +538,7 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
     os.makedirs(os.path.dirname(output_excel) or ".", exist_ok=True)
     wb.save(output_excel)
     logger.info(f"ASR 结果已写入: {output_excel} 共 {len(rows)} 条")
+    return asr_model_obj
 
 
 def run_align_split_asr(
@@ -497,6 +550,7 @@ def run_align_split_asr(
     segment_sec: float,
     work_dir: str,
     output_excel: str,
+    output_excel_4ch: Optional[str] = None,
     search_range_sec: float = 30.0,
     sample_rate: int = SAMPLE_RATE,
     text_type: str = "tn",
@@ -504,10 +558,11 @@ def run_align_split_asr(
     batch_size: int = 16,
     device: str = "cuda:0",
 ):
-    """合并执行：对齐 -> 切分 -> ASR 转写并输出 WER Excel。
+    """合并执行：对齐 -> 切分 -> ASR 转写并输出 WER Excel（1ch 与 4ch 各一份）。
 
     中间产物：work_dir/aligned/ 下为对齐后的 1ch/4ch WAV；
              work_dir/segments/、work_dir/segments_4ch/ 下为切分片段与文本。
+    4 通道片段为多声道 WAV，ASR 前会下混为单声道再识别。
     """
     concat_stem = Path(concat_wav).stem
     aligned_dir = os.path.join(work_dir, "aligned")
@@ -547,16 +602,44 @@ def run_align_split_asr(
     else:
         text_file = os.path.join(segments_dir, f"{base_name_1ch}_text_tn.txt")
 
-    logger.info("========== Step 4: ASR 转写与 WER ==========")
-    stage4_asr_eval(
+    if output_excel_4ch is None:
+        p = Path(output_excel)
+        output_excel_4ch = str(p.with_name(f"{p.stem}_4ch{p.suffix}"))
+
+    logger.info("========== Step 4a: 单通道切分 ASR 转写与 WER ==========")
+    asr_shared = stage4_asr_eval(
         segments_dir,
         text_file,
         output_excel,
         asr_model=asr_model,
         batch_size=batch_size,
         device=device,
+        multichannel_downmix=False,
+        preloaded_asr_model=None,
     )
-    logger.info("合并流程完成: 对齐 -> 切分 -> 转写 -> %s", output_excel)
+
+    base_name_4ch = Path(output_4ch).stem
+    if text_type == "itn":
+        text_file_4ch = os.path.join(segments_dir_4ch, f"{base_name_4ch}_text_itn.txt")
+    else:
+        text_file_4ch = os.path.join(segments_dir_4ch, f"{base_name_4ch}_text_tn.txt")
+
+    logger.info("========== Step 4b: 四通道切分 ASR 转写与 WER（多声道下混）==========")
+    stage4_asr_eval(
+        segments_dir_4ch,
+        text_file_4ch,
+        output_excel_4ch,
+        asr_model=asr_model,
+        batch_size=batch_size,
+        device=device,
+        multichannel_downmix=True,
+        preloaded_asr_model=asr_shared,
+    )
+    logger.info(
+        "合并流程完成: 对齐 -> 切分 -> 转写(1ch) -> %s ; 转写(4ch) -> %s",
+        output_excel,
+        output_excel_4ch,
+    )
 
 
 def parse_args():
@@ -597,6 +680,11 @@ def parse_args():
     p4.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR 模型名称，默认 Qwen3-ASR-1.7B")
     p4.add_argument("--batch_size", type=int, default=16, help="Qwen3-ASR 批推理大小，默认 16")
     p4.add_argument("--device", default="cuda:0", help="推理使用的 GPU，如 cuda:0 / cuda:1，避免多卡时张量设备不一致")
+    p4.add_argument(
+        "--multichannel_downmix",
+        action="store_true",
+        help="多声道 WAV 按通道平均下混为单声道再识别（4 通道切分片段需加此选项）",
+    )
 
     p_merge = sub.add_parser(
         "align_split_asr",
@@ -609,7 +697,12 @@ def parse_args():
     p_merge.add_argument("--concat_itn_txt", required=True, help="Stage1 输出的 *_itn.txt")
     p_merge.add_argument("--segment_sec", type=float, required=True, help="每段时长（秒），与 Stage1 分组一致，如 10")
     p_merge.add_argument("--work_dir", required=True, help="工作目录：aligned/、segments/、segments_4ch/ 将在此下生成")
-    p_merge.add_argument("--output_excel", required=True, help="最终 WER 结果 Excel 路径（.xlsx）")
+    p_merge.add_argument("--output_excel", required=True, help="单通道切分 WER 结果 Excel（.xlsx）")
+    p_merge.add_argument(
+        "--output_excel_4ch",
+        default=None,
+        help="四通道切分 WER Excel；默认与 --output_excel 同目录，文件名为 stem+_4ch.xlsx",
+    )
     p_merge.add_argument("--search_range", type=float, default=30.0, help="对齐搜索范围（秒）")
     p_merge.add_argument("--sr", type=int, default=SAMPLE_RATE)
     p_merge.add_argument("--text_type", choices=("tn", "itn"), default="tn", help="ASR 用哪类文本算 WER，默认 tn")
@@ -648,6 +741,7 @@ def main():
             asr_model=args.asr_model,
             batch_size=args.batch_size,
             device=args.device,
+            multichannel_downmix=args.multichannel_downmix,
         )
     elif args.stage == "align_split_asr":
         run_align_split_asr(
@@ -659,6 +753,7 @@ def main():
             args.segment_sec,
             args.work_dir,
             args.output_excel,
+            output_excel_4ch=args.output_excel_4ch,
             search_range_sec=args.search_range,
             sample_rate=args.sr,
             text_type=args.text_type,
@@ -682,35 +777,36 @@ if __name__ == "__main__":
 # # Phase 2（1ch + 4ch PCM 对齐）
 # python run_audio_cat_cut.py align \
 #     --concat_wav output/concat/10s_01.wav \
-#     --recorded_1ch recorded/10s_01_1ch.pcm \
-#     --recorded_4ch recorded/10s_01_4ch.pcm \
-#     --output_1ch output/aligned/10s_01_1ch.wav \
-#     --output_4ch output/aligned/10s_01_4ch.wav
+#     --recorded_1ch recorded/10s_01_ch1.pcm \
+#     --recorded_4ch recorded/10s_01_ch1.pcm \
+#     --output_1ch output/aligned/10s_01_ch1.wav \
+#     --output_4ch output/aligned/10s_01_ch4.wav
 
 # # Phase 3（1ch + 4ch 按拼接时长切分）
 # python run_audio_cat_cut.py split \
-#     --aligned_wav output/aligned/10s_01_1ch.wav \
+#     --aligned_wav output/aligned/10s_01_ch1.wav \
 #     --concat_tn_txt output/concat/10s_01_tn.txt \
 #     --concat_itn_txt output/concat/10s_01_itn.txt \
-#     --output_dir output/segments \
+#     --output_dir output/segments_ch1 \
 #     --segment_sec 10 \
-#     --aligned_wav_4ch output/aligned/10s_01_4ch.wav \
-#     --output_dir_4ch output/segments_4ch
+#     --aligned_wav_4ch output/aligned/10s_01_ch4.wav \
+#     --output_dir_4ch output/segments_ch4
 #
 # # Phase 4（切分音频 ASR 识别 + WER，输出 Excel）
 # python run_audio_cat_cut.py asr_eval \
-#     --segments_dir output/segments \
+#     --segments_dir output/segments_ch1 \
 #     --text_file output/segments/10s_01_ch1_text_tn.txt \
-#     --output_excel output/asr_wer_10s_01.xlsx
+#     --output_excel output/asr_wer_10s_01_ch1.xlsx
 #
 # # 合并：对齐 + 切分 + 转写（一步跑完 2/3/4）
 # python run_audio_cat_cut.py align_split_asr \
 #     --concat_wav output/concat/10s_01.wav \
-#     --recorded_1ch recorded/10s_01_1ch.pcm \
-#     --recorded_4ch recorded/10s_01_4ch.pcm \
+#     --recorded_1ch recorded/10s_01_ch1.pcm \
+#     --recorded_4ch recorded/10s_01_ch4.pcm \
 #     --concat_tn_txt output/concat/10s_01_tn.txt \
 #     --concat_itn_txt output/concat/10s_01_itn.txt \
 #     --segment_sec 10 \
 #     --work_dir output/pipeline_10s_01 \
-#     --output_excel output/asr_wer_10s_01.xlsx
+#     --output_excel output/asr_wer_10s_01_ch1.xlsx
+#     --output_excel_4ch output/asr_wer_10s_01_ch4.xlsx 
     main()
