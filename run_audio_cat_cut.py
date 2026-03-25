@@ -534,10 +534,12 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
         asr_model_obj = preloaded_asr_model
         logger.info("复用已加载的 ASR 模型进行推理")
     else:
+        import torch
         logger.info(f"加载 ASR 模型: {asr_model}，batch_size={batch_size}，device={device}")
         asr_model_obj = Qwen3ASRModel.from_pretrained(
             asr_model,
             device_map=device,
+            dtype=torch.bfloat16,
             max_inference_batch_size=max(batch_size, 32),
             max_new_tokens=256,
         )
