@@ -541,7 +541,7 @@ class SimpleAudioProcessor:
     """简化版音频处理器"""
     
     def __init__(self, 
-                 asr_model_name: str = "Qwen/Qwen3-ASR-1.7B",
+                 asr_model_name: str = "./Qwen/Qwen3-ASR-1.7B",
                  vad_model_name: str = "fsmn-vad",
                  device: str = "cuda:0",
                  dtype_str: str = "bfloat16",
@@ -1348,7 +1348,7 @@ def main():
     parser = argparse.ArgumentParser(description="简化版音频处理器")
     parser.add_argument("--data_dir", default="./data", help="数据目录")
     parser.add_argument("--output_dir", default="./simple_results", help="输出目录")
-    parser.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR模型名称")
+    parser.add_argument("--asr_model", default="./Qwen/Qwen3-ASR-1.7B", help="ASR模型名称")
     parser.add_argument("--vad_model", default="fsmn-vad", 
                        choices=["fsmn-vad", "fireredvad"], 
                        help="VAD模型名称")
@@ -1482,5 +1482,6 @@ def main():
 # -----------------------------------------------------------------------------
 # 实例：
 # python simple_audio_processor.py --data_dir /mnt/x_disk/xMovRDprojs/TTSA/ASR/大屏数据-瓦力/原始数据/20260210/ --output_dir /mnt/x_disk/xMovRDprojs/TTSA/ASR/大屏采集数据处理/20260210_4 --package_filter 746a9e6da86feb4a:20260207:20260207 --package_filter 798a3df7b99bf98d:20260207:20260210 --package_filter 906defbe071b417a:20260208:20260210
+# python .\simple_audio_processor.py --data_dir \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\原始数据\20260210\ --output_dir \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏采集数据处理\20260210_debug --package_filter 798a3df7b99bf98d:20260207:20260210
 if __name__ == "__main__":
     main()

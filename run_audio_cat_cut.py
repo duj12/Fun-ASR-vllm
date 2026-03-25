@@ -35,6 +35,51 @@ GROUP_CFGS = [
 ]
 HOURS_PER_FILE = 12
 
+# 各子命令中需要规范化的路径参数名（兼容 Windows 绝对路径、反斜杠、外层引号）
+_PATH_ARG_NAMES = (
+    "wav_scp",
+    "text_tn",
+    "text_itn",
+    "wav2dur",
+    "output_dir",
+    "concat_wav",
+    "recorded_1ch",
+    "recorded_4ch",
+    "output_1ch",
+    "output_4ch",
+    "aligned_wav",
+    "concat_tn_txt",
+    "concat_itn_txt",
+    "aligned_wav_4ch",
+    "output_dir_4ch",
+    "segments_dir",
+    "text_file",
+    "output_excel",
+    "work_dir",
+    "output_excel_4ch",
+)
+
+
+def normalize_fs_path(path: str) -> str:
+    """统一文件系统路径，兼容 Windows 绝对路径、混合斜杠、复制时带上的引号。"""
+    if not isinstance(path, str):
+        return path
+    p = path.strip().strip('"').strip("'")
+    if not p:
+        return p
+    p = os.path.expanduser(p)
+    return os.path.normpath(p)
+
+
+def normalize_cli_paths(args: argparse.Namespace) -> None:
+    for name in _PATH_ARG_NAMES:
+        if not hasattr(args, name):
+            continue
+        v = getattr(args, name)
+        if v is None or not isinstance(v, str):
+            continue
+        setattr(args, name, normalize_fs_path(v))
+
 
 def read_kv_file(path: str) -> Dict[str, str]:
     data = {}
@@ -427,7 +472,7 @@ def _mono_wav_for_asr(
 
 
 def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
-                   asr_model: str = "Qwen/Qwen3-ASR-1.7B", batch_size: int = 16,
+                   asr_model: str = "./Qwen/Qwen3-ASR-1.7B", batch_size: int = 16,
                    device: str = "cuda:0",
                    multichannel_downmix: bool = False,
                    preloaded_asr_model: Optional[Any] = None) -> Optional[Any]:
@@ -554,7 +599,7 @@ def run_align_split_asr(
     search_range_sec: float = 30.0,
     sample_rate: int = SAMPLE_RATE,
     text_type: str = "tn",
-    asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+    asr_model: str = "./Qwen/Qwen3-ASR-1.7B",
     batch_size: int = 16,
     device: str = "cuda:0",
 ):
@@ -677,7 +722,7 @@ def parse_args():
     p4.add_argument("--segments_dir", required=True, help="Stage3 切分结果目录（含 wav 与对应 text 文件所在目录）")
     p4.add_argument("--text_file", required=True, help="切分文本列表，格式: segment_id\\ttext（如 *_text_tn.txt）")
     p4.add_argument("--output_excel", required=True, help="输出 Excel 路径（.xlsx），列: wav_name, text, asr, wer")
-    p4.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B", help="ASR 模型名称，默认 Qwen3-ASR-1.7B")
+    p4.add_argument("--asr_model", default="./Qwen/Qwen3-ASR-1.7B", help="ASR 模型名称，默认 Qwen3-ASR-1.7B")
     p4.add_argument("--batch_size", type=int, default=16, help="Qwen3-ASR 批推理大小，默认 16")
     p4.add_argument("--device", default="cuda:0", help="推理使用的 GPU，如 cuda:0 / cuda:1，避免多卡时张量设备不一致")
     p4.add_argument(
@@ -706,8 +751,8 @@ def parse_args():
     p_merge.add_argument("--search_range", type=float, default=30.0, help="对齐搜索范围（秒）")
     p_merge.add_argument("--sr", type=int, default=SAMPLE_RATE)
     p_merge.add_argument("--text_type", choices=("tn", "itn"), default="tn", help="ASR 用哪类文本算 WER，默认 tn")
-    p_merge.add_argument("--asr_model", default="Qwen/Qwen3-ASR-1.7B")
-    p_merge.add_argument("--batch_size", type=int, default=16)
+    p_merge.add_argument("--asr_model", default="./Qwen/Qwen3-ASR-1.7B")
+    p_merge.add_argument("--batch_size", type=int, default=1)
     p_merge.add_argument("--device", default="cuda:0")
 
     return parser.parse_args()
@@ -715,6 +760,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    normalize_cli_paths(args)
     if args.stage == "concat":
         stage1_concat(args.wav_scp, args.text_tn, args.text_itn,
                       args.wav2dur, args.output_dir, args.sr)
@@ -801,8 +847,8 @@ if __name__ == "__main__":
 # # 合并：对齐 + 切分 + 转写（一步跑完 2/3/4）
 # python run_audio_cat_cut.py align_split_asr \
 #     --concat_wav output/concat/10s_01.wav \
-#     --recorded_1ch recorded/10s_01_ch1.pcm \
-#     --recorded_4ch recorded/10s_01_ch4.pcm \
+#     --recorded_1ch output/concat/10s_01_ch1.pcm \
+#     --recorded_4ch output/concat/10s_01_ch4.pcm \
 #     --concat_tn_txt output/concat/10s_01_tn.txt \
 #     --concat_itn_txt output/concat/10s_01_itn.txt \
 #     --segment_sec 10 \
