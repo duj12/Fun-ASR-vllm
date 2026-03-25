@@ -734,7 +734,7 @@ def parse_args():
     p4.add_argument("--text_file", required=True, help="切分文本列表，格式: segment_id\\ttext（如 *_text_tn.txt）")
     p4.add_argument("--output_excel", required=True, help="输出 Excel 路径（.xlsx），列: wav_name, text, asr, wer")
     p4.add_argument("--asr_model", default="./Qwen/Qwen3-ASR-1.7B", help="ASR 模型名称，默认 Qwen3-ASR-1.7B")
-    p4.add_argument("--batch_size", type=int, default=16, help="Qwen3-ASR 批推理大小，默认 16")
+    p4.add_argument("--batch_size", type=int, default=1, help="Qwen3-ASR 批推理大小，默认 16")
     p4.add_argument("--device", default="cuda:0", help="推理使用的 GPU，如 cuda:0 / cuda:1，避免多卡时张量设备不一致")
     p4.add_argument(
         "--multichannel_downmix",
