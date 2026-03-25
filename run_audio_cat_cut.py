@@ -855,4 +855,9 @@ if __name__ == "__main__":
 #     --work_dir output/pipeline_10s_01 \
 #     --output_excel output/asr_wer_10s_01_ch1.xlsx
 #     --output_excel_4ch output/asr_wer_10s_01_ch4.xlsx 
+
+# 实例：
+# python run_audio_cat_cut.py align_split_asr --concat_wav \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01.wav  --recorded_1ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\/10s_01_ch1.pcm  --recorded_4ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_ch4.pcm  --concat_tn_txt \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_tn.txt  --concat_itn_txt  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_itn.txt  --segment_sec 10  --work_dir  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output  --output_excel  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output\asr_wer_10s_01_ch1.xlsx  --output_excel_4ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output\asr_wer_10s_01_ch4.xlsx    
+
+
     main()
