@@ -34,6 +34,8 @@ GROUP_CFGS = [
     {"name": "30s", "max_dur": 30.0, "pad_to": 30.0},
 ]
 HOURS_PER_FILE = 12
+# 4ch float32->int16 写盘时分块帧数，避免与 aligned_4ch 同尺寸临时数组导致峰值内存翻倍
+WRITE_4CH_PCM_CHUNK_FRAMES = 400_000
 
 # 各子命令中需要规范化的路径参数名（兼容 Windows 绝对路径、反斜杠、外层引号）
 _PATH_ARG_NAMES = (
@@ -331,18 +333,27 @@ def stage2_align(concat_wav, recorded_1ch_pcm, recorded_4ch_pcm,
     os.makedirs(os.path.dirname(output_4ch_wav) or ".", exist_ok=True)
 
     sf.write(output_1ch_wav, aligned_1ch, sample_rate)
-    audio_int16 = np.ascontiguousarray(
-        (aligned_4ch * 32767).clip(-32768, 32767).astype(np.int16)
-    )
-    # WAV 格式头部用 32-bit 存 chunk size，最大 ~4GB；超出时自动用 RF64
-    data_bytes = audio_int16.shape[0] * audio_int16.shape[1] * audio_int16.dtype.itemsize
+    # 4ch：分块 float32->int16 并流式写入，避免整段 (aligned_4ch * scale) 再占一份 ~10GB 内存
+    n_frames, n_ch = aligned_4ch.shape[0], aligned_4ch.shape[1]
+    data_bytes = n_frames * n_ch * np.dtype(np.int16).itemsize
     fmt = "RF64" if data_bytes >= 4 * 1024 ** 3 else "WAV"
-    logger.info(f"4ch data size: {data_bytes / 1024**3:.2f}GB, using {fmt} format")
+    logger.info(
+        f"4ch data size: {data_bytes / 1024**3:.2f}GB, using {fmt} format, "
+        f"write chunk={WRITE_4CH_PCM_CHUNK_FRAMES} frames"
+    )
+    chunk = WRITE_4CH_PCM_CHUNK_FRAMES
     with sf.SoundFile(
-        output_4ch_wav, "w", samplerate=sample_rate, channels=4,
+        output_4ch_wav, "w", samplerate=sample_rate, channels=n_ch,
         subtype="PCM_16", format=fmt,
     ) as f:
-        f.write(audio_int16)
+        for start in range(0, n_frames, chunk):
+            end = min(start + chunk, n_frames)
+            n = end - start
+            sl = aligned_4ch[start:end]
+            work = np.empty((n, n_ch), dtype=np.float32, order="C")
+            np.multiply(sl, 32767.0, out=work)
+            np.clip(work, -32768, 32767, out=work)
+            f.write(work.astype(np.int16, copy=False))
     logger.info(
         f"aligned 1ch -> {output_1ch_wav}  "
         f"offset={offset_1ch}({offset_1ch / sample_rate:.3f}s)  "
