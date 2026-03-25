@@ -8,3 +8,4 @@ funasr>=1.2.7
 pandas
 qwen-asr
 openpyxl
+websockets
