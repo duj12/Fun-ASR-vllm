@@ -12,6 +12,7 @@ Merged: align_split_asr = Stage 2 + 3 + 4（1ch 与 4ch 各输出切分目录与
 """
 
 import os
+import sys
 import argparse
 import logging
 import tempfile
@@ -59,6 +60,7 @@ _PATH_ARG_NAMES = (
     "output_excel",
     "work_dir",
     "output_excel_4ch",
+    "input_dir",
 )
 
 
@@ -81,6 +83,42 @@ def normalize_cli_paths(args: argparse.Namespace) -> None:
         if v is None or not isinstance(v, str):
             continue
         setattr(args, name, normalize_fs_path(v))
+
+
+def resolve_align_split_input_dir(input_dir: str) -> Dict[str, str]:
+    """从 input_dir 解析 align_split_asr 所需的 5 个文件路径。
+
+    - 唯一 ``.wav``：拼接参考音频
+    - 文件名以 ``ch1.pcm`` 结尾：单通道 PCM
+    - 文件名以 ``ch4.pcm`` 结尾：四通道 PCM
+    - 文件名以 ``_tn.txt`` 结尾：concat tn 文本
+    - 文件名以 ``_itn.txt`` 结尾：concat itn 文本
+    """
+    d = normalize_fs_path(input_dir)
+    if not os.path.isdir(d):
+        raise ValueError(f"input_dir 不是目录: {d}")
+    names = [n for n in os.listdir(d) if not n.startswith(".")]
+
+    def pick_one(suffix: str, desc: str) -> str:
+        cands = [n for n in names if n.endswith(suffix)]
+        if len(cands) != 1:
+            raise ValueError(
+                f"input_dir 中期望恰好 1 个以 {suffix!r} 结尾的文件（{desc}），实际 {len(cands)}: {cands}"
+            )
+        return os.path.join(d, cands[0])
+
+    wavs = [n for n in names if n.lower().endswith(".wav")]
+    if len(wavs) != 1:
+        raise ValueError(
+            f"input_dir 中期望恰好 1 个 .wav（拼接参考音频），实际 {len(wavs)}: {wavs}"
+        )
+    return {
+        "concat_wav": os.path.join(d, wavs[0]),
+        "recorded_1ch": pick_one("ch1.pcm", "单通道 PCM"),
+        "recorded_4ch": pick_one("ch4.pcm", "四通道 PCM"),
+        "concat_tn_txt": pick_one("_tn.txt", "tn 文本"),
+        "concat_itn_txt": pick_one("_itn.txt", "itn 文本"),
+    }
 
 
 def read_kv_file(path: str) -> Dict[str, str]:
@@ -607,7 +645,7 @@ def run_align_split_asr(
     concat_itn_txt: str,
     segment_sec: float,
     work_dir: str,
-    output_excel: str,
+    output_excel: Optional[str] = None,
     output_excel_4ch: Optional[str] = None,
     search_range_sec: float = 30.0,
     sample_rate: int = SAMPLE_RATE,
@@ -621,7 +659,14 @@ def run_align_split_asr(
     中间产物：work_dir/aligned/ 下为对齐后的 1ch/4ch WAV；
              work_dir/segments/、work_dir/segments_4ch/ 下为切分片段与文本。
     4 通道片段为多声道 WAV，ASR 前会下混为单声道再识别。
+    output_excel / output_excel_4ch 为 None 时默认为 work_dir/asr_wer_ch1.xlsx 与 work_dir/asr_wer_ch4.xlsx。
     """
+    work_dir = normalize_fs_path(work_dir)
+    if output_excel is None:
+        output_excel = os.path.join(work_dir, "asr_wer_ch1.xlsx")
+    if output_excel_4ch is None:
+        output_excel_4ch = os.path.join(work_dir, "asr_wer_ch4.xlsx")
+
     concat_stem = Path(concat_wav).stem
     aligned_dir = os.path.join(work_dir, "aligned")
     segments_dir = os.path.join(work_dir, "segments")
@@ -659,10 +704,6 @@ def run_align_split_asr(
         text_file = os.path.join(segments_dir, f"{base_name_1ch}_text_itn.txt")
     else:
         text_file = os.path.join(segments_dir, f"{base_name_1ch}_text_tn.txt")
-
-    if output_excel_4ch is None:
-        p = Path(output_excel)
-        output_excel_4ch = str(p.with_name(f"{p.stem}_4ch{p.suffix}"))
 
     logger.info("========== Step 4a: 单通道切分 ASR 转写与 WER ==========")
     asr_shared = stage4_asr_eval(
@@ -718,7 +759,7 @@ def parse_args():
     p2.add_argument("--recorded_4ch", required=True, help="录制的4通道16k PCM文件")
     p2.add_argument("--output_1ch", required=True, help="对齐后的单通道WAV输出路径")
     p2.add_argument("--output_4ch", required=True, help="对齐后的4通道WAV输出路径")
-    p2.add_argument("--search_range", type=float, default=30.0)
+    p2.add_argument("--search_range", type=float, default=300.0)
     p2.add_argument("--sr", type=int, default=SAMPLE_RATE)
 
     p3 = sub.add_parser("split", help="Stage 3: split aligned audio (1ch + optional 4ch)")
@@ -748,20 +789,30 @@ def parse_args():
         "align_split_asr",
         help="合并执行: 对齐(2) -> 切分(3) -> ASR转写(4)，中间结果落在 --work_dir",
     )
-    p_merge.add_argument("--concat_wav", required=True, help="原始拼接 WAV（参考音频）")
-    p_merge.add_argument("--recorded_1ch", required=True, help="录制的单通道 16k PCM")
-    p_merge.add_argument("--recorded_4ch", required=True, help="录制的 4 通道 16k PCM")
-    p_merge.add_argument("--concat_tn_txt", required=True, help="Stage1 输出的 *_tn.txt")
-    p_merge.add_argument("--concat_itn_txt", required=True, help="Stage1 输出的 *_itn.txt")
+    p_merge.add_argument(
+        "--input_dir",
+        default=None,
+        help="输入目录：内含 1 个 .wav、各 1 个以 ch1.pcm / ch4.pcm / _tn.txt / _itn.txt 结尾的文件；"
+        "若指定则不必再传 --concat_wav 等五个路径",
+    )
+    p_merge.add_argument("--concat_wav", default=None, help="原始拼接 WAV（参考音频）；与 --input_dir 二选一")
+    p_merge.add_argument("--recorded_1ch", default=None, help="录制的单通道 16k PCM")
+    p_merge.add_argument("--recorded_4ch", default=None, help="录制的 4 通道 16k PCM")
+    p_merge.add_argument("--concat_tn_txt", default=None, help="Stage1 输出的 *_tn.txt")
+    p_merge.add_argument("--concat_itn_txt", default=None, help="Stage1 输出的 *_itn.txt")
     p_merge.add_argument("--segment_sec", type=float, required=True, help="每段时长（秒），与 Stage1 分组一致，如 10")
     p_merge.add_argument("--work_dir", required=True, help="工作目录：aligned/、segments/、segments_4ch/ 将在此下生成")
-    p_merge.add_argument("--output_excel", required=True, help="单通道切分 WER 结果 Excel（.xlsx）")
+    p_merge.add_argument(
+        "--output_excel",
+        default=None,
+        help="单通道 WER Excel；默认 work_dir/asr_wer_ch1.xlsx",
+    )
     p_merge.add_argument(
         "--output_excel_4ch",
         default=None,
-        help="四通道切分 WER Excel；默认与 --output_excel 同目录，文件名为 stem+_4ch.xlsx",
+        help="四通道 WER Excel；默认 work_dir/asr_wer_ch4.xlsx",
     )
-    p_merge.add_argument("--search_range", type=float, default=30.0, help="对齐搜索范围（秒）")
+    p_merge.add_argument("--search_range", type=float, default=300.0, help="对齐搜索范围（秒）")
     p_merge.add_argument("--sr", type=int, default=SAMPLE_RATE)
     p_merge.add_argument("--text_type", choices=("tn", "itn"), default="tn", help="ASR 用哪类文本算 WER，默认 tn")
     p_merge.add_argument("--asr_model", default="./Qwen/Qwen3-ASR-1.7B")
@@ -803,15 +854,48 @@ def main():
             multichannel_downmix=args.multichannel_downmix,
         )
     elif args.stage == "align_split_asr":
+        if getattr(args, "input_dir", None):
+            try:
+                resolved = resolve_align_split_input_dir(args.input_dir)
+            except ValueError as e:
+                logger.error("%s", e)
+                sys.exit(1)
+            cw = resolved["concat_wav"]
+            r1 = resolved["recorded_1ch"]
+            r4 = resolved["recorded_4ch"]
+            tn = resolved["concat_tn_txt"]
+            itn = resolved["concat_itn_txt"]
+        else:
+            if not all(
+                (
+                    args.concat_wav,
+                    args.recorded_1ch,
+                    args.recorded_4ch,
+                    args.concat_tn_txt,
+                    args.concat_itn_txt,
+                )
+            ):
+                logger.error(
+                    "align_split_asr 请提供 --input_dir，或同时提供 "
+                    "--concat_wav --recorded_1ch --recorded_4ch --concat_tn_txt --concat_itn_txt"
+                )
+                sys.exit(1)
+            cw, r1, r4, tn, itn = (
+                args.concat_wav,
+                args.recorded_1ch,
+                args.recorded_4ch,
+                args.concat_tn_txt,
+                args.concat_itn_txt,
+            )
         run_align_split_asr(
-            args.concat_wav,
-            args.recorded_1ch,
-            args.recorded_4ch,
-            args.concat_tn_txt,
-            args.concat_itn_txt,
+            cw,
+            r1,
+            r4,
+            tn,
+            itn,
             args.segment_sec,
             args.work_dir,
-            args.output_excel,
+            output_excel=args.output_excel,
             output_excel_4ch=args.output_excel_4ch,
             search_range_sec=args.search_range,
             sample_rate=args.sr,
@@ -865,12 +949,13 @@ if __name__ == "__main__":
 #     --concat_tn_txt output/concat/10s_01_tn.txt \
 #     --concat_itn_txt output/concat/10s_01_itn.txt \
 #     --segment_sec 10 \
-#     --work_dir output/pipeline_10s_01 \
-#     --output_excel output/asr_wer_10s_01_ch1.xlsx
-#     --output_excel_4ch output/asr_wer_10s_01_ch4.xlsx 
-
-# 实例：
-# python run_audio_cat_cut.py align_split_asr --concat_wav \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01.wav  --recorded_1ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\/10s_01_ch1.pcm  --recorded_4ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_ch4.pcm  --concat_tn_txt \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_tn.txt  --concat_itn_txt  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\10s_01_itn.txt  --segment_sec 10  --work_dir  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output  --output_excel  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output\asr_wer_10s_01_ch1.xlsx  --output_excel_4ch  \\192.168.88.14\Algorithm\xMovRDprojs\TTSA\ASR\大屏数据-瓦力\模拟数据采集\数据采集\处理后\3.17\output\asr_wer_10s_01_ch4.xlsx    
-
+#     --work_dir output/pipeline_10s_01
+#     # 省略 --output_excel / --output_excel_4ch 时默认为 work_dir/asr_wer_ch1.xlsx 与 work_dir/asr_wer_ch4.xlsx
+#
+# # 合并（使用 input_dir：目录内需 1 个 .wav、各 1 个 ch1.pcm / ch4.pcm / _tn.txt / _itn.txt）
+# python run_audio_cat_cut.py align_split_asr \
+#     --input_dir /path/to/batch_inputs \
+#     --segment_sec 10 \
+#     --work_dir /path/to/output_work
 
     main()
