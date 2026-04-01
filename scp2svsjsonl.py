@@ -2,7 +2,7 @@ import argparse
 import json
 import re
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 
 
@@ -87,6 +87,57 @@ def read_key_value_file(file_path: str) -> Dict[str, str]:
     return data
 
 
+def resolve_sensevoice_maps(args) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """
+    解析语种 / 情绪 / 声音事件文件（与 prepare_domain_asr_dataset + run_sense_voice 输出兼容）。
+    优先使用显式路径；否则若设置了 sensevoice_prefix 或默认 sense_voice 前缀且文件存在则加载。
+    """
+    lang_map: Dict[str, str] = {}
+    emo_map: Dict[str, str] = {}
+    evt_map: Dict[str, str] = {}
+
+    def load(path: Optional[str], into: Dict[str, str], label: str) -> None:
+        if not path:
+            return
+        if not os.path.isfile(path):
+            print(f"Warning: {label} file not found: {path}")
+            return
+        n0 = len(into)
+        into.update(read_key_value_file(path))
+        print(f"Loaded {len(into) - n0} entries from {label}: {path}")
+
+    load(args.language_file, lang_map, "language")
+    load(args.emotion_file, emo_map, "emotion")
+    load(args.event_file, evt_map, "event")
+
+    return lang_map, emo_map, evt_map
+
+
+def pick_language_for_key(
+    key: str,
+    text: str,
+    lang_map: Dict[str, str],
+    args,
+) -> str:
+    if args.text_language:
+        return args.text_language
+    if key in lang_map and lang_map[key].strip():
+        return lang_map[key].strip()
+    return detect_language(text)
+
+
+def pick_emo_for_key(key: str, emo_map: Dict[str, str]) -> str:
+    if key in emo_map and emo_map[key].strip():
+        return emo_map[key].strip()
+    return "<|NEUTRAL|>"
+
+
+def pick_event_for_key(key: str, evt_map: Dict[str, str]) -> str:
+    if key in evt_map and evt_map[key].strip():
+        return evt_map[key].strip()
+    return "<|Speech|>"
+
+
 def process_files(args):
     """处理所有文件并生成JSONL"""
     
@@ -96,6 +147,8 @@ def process_files(args):
     
     print("Reading wav2dur...")
     wav2dur = read_key_value_file(args.wav2dur)
+    
+    lang_map, emo_map, evt_map = resolve_sensevoice_maps(args)
     
     # 读取文本文件
     text_tn = {}
@@ -148,11 +201,7 @@ def process_files(args):
             if key in text_tn:
                 target_tn = text_tn[key]
                 
-                # 计算语言
-                if args.text_language:
-                    text_language = args.text_language
-                else:
-                    text_language = detect_language(target_tn)
+                text_language = pick_language_for_key(key, target_tn, lang_map, args)
                 
                 # 计算文本长度
                 target_len = count_text_length(target_tn, text_language)
@@ -161,8 +210,8 @@ def process_files(args):
                 json_obj_tn = {
                     "key": key,
                     "text_language": text_language,
-                    "emo_target": "<|NEUTRAL|>",
-                    "event_target": "<|Speech|>",
+                    "emo_target": pick_emo_for_key(key, emo_map),
+                    "event_target": pick_event_for_key(key, evt_map),
                     "with_or_wo_itn": "<|woitn|>",
                     "target": target_tn,
                     "source": source,
@@ -177,11 +226,7 @@ def process_files(args):
             if key in text_itn:
                 target_itn = text_itn[key]
                 
-                # 计算语言
-                if args.text_language:
-                    text_language = args.text_language
-                else:
-                    text_language = detect_language(target_itn)
+                text_language = pick_language_for_key(key, target_itn, lang_map, args)
                 
                 # 计算文本长度
                 target_len = count_text_length(target_itn, text_language)
@@ -190,8 +235,8 @@ def process_files(args):
                 json_obj_itn = {
                     "key": key,
                     "text_language": text_language,
-                    "emo_target": "<|NEUTRAL|>",
-                    "event_target": "<|Speech|>",
+                    "emo_target": pick_emo_for_key(key, emo_map),
+                    "event_target": pick_event_for_key(key, evt_map),
                     "with_or_wo_itn": "<|withitn|>",
                     "target": target_itn,
                     "source": source,
@@ -228,12 +273,21 @@ def main():
     parser = argparse.ArgumentParser(description="Convert SCP files to SenseVoice JSONL format")
     
     parser.add_argument('--wav_scp', required=True, help='Path to wav.scp file')
-    parser.add_argument('--text_tn', help='Path to text_tn file (optional)')
-    parser.add_argument('--text_itn', help='Path to text_itn file (optional)')
+    parser.add_argument('--text_tn', help='Path to text_tn file (default: <wav.scp_dir>/text_tn if exists)')
+    parser.add_argument('--text_itn', help='Path to text_itn file (default: <wav.scp_dir>/text_itn if exists)')
     parser.add_argument('--wav2dur', required=True, help='Path to wav2dur file')
     parser.add_argument('--output', required=True, help='Output JSONL file path')
     parser.add_argument('--text_language', choices=['<|zh|>', '<|en|>'], 
-                       help='Specify text language (auto-detected if not provided)')
+                       help='Force text language for all utterances (overrides per-utt language file)')
+    parser.add_argument(
+        '--sensevoice_prefix',
+        default=None,
+        help='Base path for SenseVoice side outputs: {prefix}_language, {prefix}_emotion, {prefix}_event '
+             '(default: <wav.scp_dir>/sense_voice if those files exist)',
+    )
+    parser.add_argument('--language_file', help='Per-utt language tags (utt<TAB>tag), e.g. from run_sense_voice.py')
+    parser.add_argument('--emotion_file', help='Per-utt emotion tags')
+    parser.add_argument('--event_file', help='Per-utt sound event tags')
     
     args = parser.parse_args()
     
@@ -242,10 +296,35 @@ def main():
     for file_path in required_files:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Required file not found: {file_path}")
+
+    wav_dir = os.path.dirname(os.path.abspath(args.wav_scp))
+    if args.sensevoice_prefix is None:
+        default_prefix = os.path.join(wav_dir, 'sense_voice')
+        if os.path.isfile(default_prefix + '_language'):
+            args.sensevoice_prefix = default_prefix
+    if args.sensevoice_prefix:
+        p = args.sensevoice_prefix
+        if args.language_file is None and os.path.isfile(p + '_language'):
+            args.language_file = p + '_language'
+        if args.emotion_file is None and os.path.isfile(p + '_emotion'):
+            args.emotion_file = p + '_emotion'
+        if args.event_file is None and os.path.isfile(p + '_event'):
+            args.event_file = p + '_event'
+
+    if args.text_tn is None:
+        cand = os.path.join(wav_dir, 'text_tn')
+        if os.path.isfile(cand):
+            args.text_tn = cand
+    if args.text_itn is None:
+        cand = os.path.join(wav_dir, 'text_itn')
+        if os.path.isfile(cand):
+            args.text_itn = cand
     
     # 至少需要一个文本文件
     if not args.text_tn and not args.text_itn:
-        raise ValueError("Either --text_tn or --text_itn must be provided")
+        raise ValueError(
+            "Either --text_tn or --text_itn must be provided, or place text_tn/text_itn next to wav.scp"
+        )
     
     process_files(args)
 

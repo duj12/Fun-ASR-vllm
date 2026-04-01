@@ -1,4 +1,5 @@
 import argparse
+import glob
 import os
 import re
 import tqdm
@@ -229,14 +230,37 @@ if __name__ == "__main__":
     for p in process_list:
         p.join()
 
-    # 合并三个文本文件
+    # 合并三个文本文件（跨平台，不依赖 cat/rm）
     print("Merging results...")
-    os.system(f"cat {args.mos_res}_language.* | sort > {args.mos_res}_language")
-    os.system(f"cat {args.mos_res}_emotion.* | sort > {args.mos_res}_emotion")
-    os.system(f"cat {args.mos_res}_event.* | sort > {args.mos_res}_event")
-    
-    # 清理临时文件
-    os.system(f"rm {args.mos_res}_language.* {args.mos_res}_emotion.* {args.mos_res}_event.*  {args.wav_scp}.temp_*")
+
+    def _merge_sorted_parts(pattern: str, out_path: str) -> None:
+        paths = sorted(glob.glob(pattern))
+        if not paths:
+            return
+        lines = []
+        for p in paths:
+            with open(p, "r", encoding="utf-8") as f:
+                lines.extend(f.readlines())
+        lines.sort()
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+    base = args.mos_res
+    _merge_sorted_parts(f"{base}_language.*", f"{base}_language")
+    _merge_sorted_parts(f"{base}_emotion.*", f"{base}_emotion")
+    _merge_sorted_parts(f"{base}_event.*", f"{base}_event")
+
+    for pat in (
+        f"{base}_language.*",
+        f"{base}_emotion.*",
+        f"{base}_event.*",
+        f"{args.wav_scp}.temp_*",
+    ):
+        for p in glob.glob(pat):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     
     print("Processing completed!")
     print(f"Results saved to:")
