@@ -11,6 +11,9 @@
     --split_train_test
 
 JSONL 默认写入 out_dir：all.jsonl；若划分 train/test 则另有 train.jsonl、test.jsonl。
+
+若在 audio_dir 下（递归）同时存在匹配 *_tn.txt 与 *_itn.txt 的文件，则视为已提供 TN/ITN 文本：
+与最终 text 的 utt_id 取交集后直接写入 text_tn / text_itn，不再对 text 做正则与反正则。
 """
 
 from __future__ import annotations
@@ -86,7 +89,7 @@ def _write_kaldi_map(path: Path, mapping: Dict[str, str], sort_keys: bool = True
             f.write(f"{k}\t{mapping[k]}\n")
 
 
-def _filter_kaldi_file(src: Path, dst: Path, keep: Set[str]) -> None:
+def _filter_kaldi_file(src: Path, dst: Path, keep: Set[str]) -> None: 
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(src, "r", encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
         for line in fin:
@@ -215,6 +218,47 @@ def _to_text_itn(raw: str) -> str:
     return inverse_normalize_text(t)
 
 
+def _merge_kaldi_maps_from_files(paths: List[Path], label: str) -> Dict[str, str]:
+    """按路径排序后合并；同一 key 后出现覆盖前出现，若内容不同则告警。"""
+    merged: Dict[str, str] = {}
+    for p in paths:
+        part = _read_kaldi_map(p)
+        for k, v in part.items():
+            if k in merged and merged[k] != v:
+                print(f"警告: {label} 中 key {k!r} 在 {p} 与先前文件内容不一致，保留后者")
+            merged[k] = v
+    return merged
+
+
+def _load_precomputed_tn_itn_pair(
+    audio_dir: Path,
+) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, str]], Dict[str, object]]:
+    """
+    若 audio_dir 下递归存在至少一个 *_tn.txt 且至少一个 *_itn.txt，则加载并合并为两个字典；
+    否则返回 (None, None, meta)。
+    """
+    meta: Dict[str, object] = {}
+    tn_paths = sorted(audio_dir.rglob("*_tn.txt"))
+    itn_paths = sorted(audio_dir.rglob("*_itn.txt"))
+    if not tn_paths or not itn_paths:
+        meta["precomputed_tn_itn"] = False
+        meta["reason"] = (
+            "missing *_tn.txt or *_itn.txt"
+            if not tn_paths and not itn_paths
+            else ("no *_tn.txt" if not tn_paths else "no *_itn.txt")
+        )
+        return None, None, meta
+
+    tn_map = _merge_kaldi_maps_from_files(tn_paths, "TN")
+    itn_map = _merge_kaldi_maps_from_files(itn_paths, "ITN")
+    meta["precomputed_tn_itn"] = True
+    meta["tn_files"] = [str(p) for p in tn_paths]
+    meta["itn_files"] = [str(p) for p in itn_paths]
+    meta["n_tn_keys"] = len(tn_map)
+    meta["n_itn_keys"] = len(itn_map)
+    return tn_map, itn_map, meta
+
+
 # ---------------------------------------------------------------------------
 # 主构建
 # ---------------------------------------------------------------------------
@@ -238,7 +282,6 @@ def build_kaldi_and_texts(
         text_map = _load_excel_map(excel_path)
     else:
         auto_excel = _find_excel_under(audio_dir)
-        print(f"auto_excel={auto_excel}, args.ignore_excel={args.ignore_excel}")
         if auto_excel and not args.ignore_excel:
             print(f"使用 Excel 标注: {auto_excel}")
             text_map = _load_excel_map(auto_excel)
@@ -299,6 +342,39 @@ def build_kaldi_and_texts(
     if not kept:
         raise RuntimeError("过滤时长后无剩余 utterance")
 
+    n_after_duration = len(kept)
+
+    precomputed_meta: Dict[str, object] = {}
+    tn_pre: Optional[Dict[str, str]] = None
+    itn_pre: Optional[Dict[str, str]] = None
+    if not args.ignore_precomputed_tn_itn:
+        tn_pre, itn_pre, precomputed_meta = _load_precomputed_tn_itn_pair(audio_dir)
+
+    use_precomputed = (
+        tn_pre is not None
+        and itn_pre is not None
+        and precomputed_meta.get("precomputed_tn_itn") is True
+    )
+
+    if use_precomputed:
+        keys_aligned = kept & set(tn_pre.keys()) & set(itn_pre.keys())
+        dropped = kept - keys_aligned
+        if dropped:
+            print(
+                f"使用预计算 *_tn.txt / *_itn.txt：与 text 对齐 key，丢弃在 tn/itn 中缺失的 {len(dropped)} 条 "
+                f"（示例: {sorted(dropped)[:5]}）"
+            )
+        if not keys_aligned:
+            raise RuntimeError(
+                "已找到 *_tn.txt 与 *_itn.txt，但与当前 wav/text（含时长过滤后）无共同 key，"
+                "请检查 utt_id 是否与 text 一致。"
+            )
+        kept = keys_aligned
+        print(
+            f"使用预计算 TN/ITN（不再对 text 做正则/反正则），保留 {len(kept)} 条；"
+            f"TN 文件: {precomputed_meta.get('tn_files')!r} ITN 文件: {precomputed_meta.get('itn_files')!r}"
+        )
+
     wav_f = {k: wav_map[k] for k in kept}
     text_f = {k: text_map[k] for k in kept}
     utt2spk_f = {k: utt2spk[k] for k in kept}
@@ -322,18 +398,26 @@ def build_kaldi_and_texts(
 
     text_tn: Dict[str, str] = {}
     text_itn: Dict[str, str] = {}
-    for u, raw in text_f.items():
-        text_tn[u] = _to_text_tn(raw, args.apply_text_tn)
-        text_itn[u] = _to_text_itn(raw)
+    if use_precomputed and tn_pre is not None and itn_pre is not None:
+        for u in sorted(kept):
+            text_tn[u] = tn_pre[u]
+            text_itn[u] = itn_pre[u]
+    else:
+        for u, raw in text_f.items():
+            text_tn[u] = _to_text_tn(raw, args.apply_text_tn)
+            text_itn[u] = _to_text_itn(raw)
     _write_kaldi_map(out_dir / "text_tn", text_tn)
     _write_kaldi_map(out_dir / "text_itn", text_itn)
 
     meta = {
         "n_audio_found": len(audios),
         "n_after_align": len(common),
-        "n_after_duration": len(kept),
+        "n_after_duration": n_after_duration,
+        "n_final_utterances": len(kept),
         "only_wav_no_text": len(only_wav),
         "only_text_no_wav": len(only_txt),
+        "text_tn_itn_mode": "precomputed_files" if use_precomputed else "from_text_normalize",
+        **precomputed_meta,
     }
     with open(out_dir / "prepare_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -473,6 +557,11 @@ def parse_args() -> argparse.Namespace:
         help="utt_id：仅文件名无后缀，或相对 audio_dir 的路径（防重名）",
     )
     p.add_argument("--apply_text_tn", action="store_true", help="text_tn 使用 kaldi_text_normalizer 完整 TN；否则仅去标点")
+    p.add_argument(
+        "--ignore_precomputed_tn_itn",
+        action="store_true",
+        help="即使存在 *_tn.txt / *_itn.txt 也强制从 text 生成 text_tn、text_itn",
+    )
     p.add_argument("--min_duration", type=float, default=0.1)
     p.add_argument("--max_duration", type=float, default=40.0)
     p.add_argument("--dur_workers", type=int, default=8)

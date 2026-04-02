@@ -9,10 +9,12 @@ Stage 3: Split aligned audio by original segment duration, restore text
 Stage 4: ASR evaluation on split segments, output WER to Excel
 
 Merged: align_split_asr = Stage 2 + 3 + 4（1ch 与 4ch 各输出切分目录与 WER Excel）
+Stage 5: 仅按单通道 WER 筛选，四通道按同行下标同步；结果写入 segments/ 与 segments_4ch/；完成后删除 aligned/
 """
 
 import os
 import sys
+import shutil
 import argparse
 import logging
 import tempfile
@@ -61,6 +63,8 @@ _PATH_ARG_NAMES = (
     "work_dir",
     "output_excel_4ch",
     "input_dir",
+    "excel_ch1",
+    "excel_ch4",
 )
 
 
@@ -637,6 +641,214 @@ def stage4_asr_eval(segments_dir: str, text_file: str, output_excel: str,
     return asr_model_obj
 
 
+def _parse_wer_range_spec(spec: str) -> Tuple[int, int, float]:
+    """解析 ``start:end:threshold``，序号区间为闭区间 [start, end]（与 Excel 数据行 0 起始下标一致）。"""
+    parts = spec.strip().split(":")
+    if len(parts) != 3:
+        raise ValueError(f"范围格式应为 start:end:threshold，收到: {spec!r}")
+    a, b, t = int(parts[0].strip()), int(parts[1].strip()), float(parts[2].strip())
+    if a > b:
+        a, b = b, a
+    return a, b, t
+
+
+def _effective_wer_threshold(
+    row_index: int,
+    ranges: List[Tuple[int, int, float]],
+    global_max_wer: float,
+) -> float:
+    """行 ``row_index`` 上允许的最大 wer：全局上限与各包含该行的区间阈值取最小。"""
+    applicable = [thr for lo, hi, thr in ranges if lo <= row_index <= hi]
+    if applicable:
+        return min(global_max_wer, min(applicable))
+    return global_max_wer
+
+
+def _cell_to_wer_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_excel_rows(path: str) -> Tuple[List[str], List[Dict[str, Any]]]:
+    try:
+        import openpyxl
+    except ImportError:
+        raise ImportError("Stage 5 需要 openpyxl，请执行: pip install openpyxl")
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    header_row = next(rows_iter, None)
+    if not header_row:
+        wb.close()
+        return [], []
+    headers = [str(h).strip() if h is not None else "" for h in header_row]
+    data = []
+    for row in rows_iter:
+        d = {}
+        for i, h in enumerate(headers):
+            if h:
+                d[h] = row[i] if i < len(row) else None
+        data.append(d)
+    wb.close()
+    return headers, data
+
+
+def _compute_kept_row_indices_ch1(
+    data: List[Dict[str, Any]],
+    ranges: List[Tuple[int, int, float]],
+    global_max_wer: float,
+) -> List[int]:
+    """仅按单通道 WER 规则得到保留行的下标（0 起始）；wer 无效的行不保留。"""
+    kept_idx: List[int] = []
+    for i, row in enumerate(data):
+        lower = {k.lower(): v for k, v in row.items()}
+        wer_raw = lower.get("wer")
+        w = _cell_to_wer_float(wer_raw)
+        if w is None:
+            continue
+        thr = _effective_wer_threshold(i, ranges, global_max_wer)
+        if w <= thr:
+            kept_idx.append(i)
+    return kept_idx
+
+
+def _filter_excel_rows(
+    data: List[Dict[str, Any]],
+    ranges: List[Tuple[int, int, float]],
+    global_max_wer: float,
+) -> List[Dict[str, Any]]:
+    """按行下标（0 起始）与 wer 阈值保留行（单通道逻辑）。"""
+    idx = _compute_kept_row_indices_ch1(data, ranges, global_max_wer)
+    return [data[i] for i in idx]
+
+
+def _write_filtered_excel(
+    out_path: str,
+    rows: List[Dict[str, Any]],
+    source_headers: List[str],
+) -> None:
+    try:
+        import openpyxl
+    except ImportError:
+        raise ImportError("Stage 5 需要 openpyxl，请执行: pip install openpyxl")
+
+    # 列顺序：wav_name / text 重命名，其余保持原列名
+    key_order = []
+    for h in source_headers:
+        if not h:
+            continue
+        hl = h.lower()
+        if hl == "wav_name":
+            key_order.append((h, "音频名称"))
+        elif hl == "text":
+            key_order.append((h, "标注后文本"))
+        else:
+            key_order.append((h, h))
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ASR"
+    ws.append([disp for _src, disp in key_order])
+    for row in rows:
+        line = []
+        for src_key, _disp in key_order:
+            line.append(row.get(src_key, ""))
+        ws.append(line)
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    wb.save(out_path)
+
+
+def stage5_filter_wer(
+    output_dir: str,
+    range_specs: List[str],
+    global_max_wer: float = 1.0,
+    excel_ch1: Optional[str] = None,
+    excel_ch4: Optional[str] = None,
+):
+    """Stage 5: **仅对单通道** WER Excel 做区间筛选；四通道按相同行下标同步子集，保证 1ch/4ch 条数一致。
+
+    输出：单通道 -> ``output_dir/segments/asr_wer_ch1_filter.xlsx``，四通道 -> ``output_dir/segments_4ch/asr_wer_ch4_filter.xlsx``（与 ch1 保留行一一对应）。
+    处理结束后若存在 ``output_dir/aligned/``（第二步对齐产物），则整目录删除以节省磁盘。
+    数据行下标为 **0 起始**（与 Excel 中首条数据行对应下标 0），与 Stage3/4 切分顺序一致。
+    """
+    d = normalize_fs_path(output_dir)
+    if not os.path.isdir(d):
+        raise ValueError(f"output_dir 不是目录: {d}")
+
+    ranges = [_parse_wer_range_spec(s) for s in range_specs]
+    if excel_ch1 is None:
+        excel_ch1 = os.path.join(d, "asr_wer_ch1.xlsx")
+    if excel_ch4 is None:
+        excel_ch4 = os.path.join(d, "asr_wer_ch4.xlsx")
+
+    segments_dir = os.path.join(d, "segments")
+    segments_4ch_dir = os.path.join(d, "segments_4ch")
+
+    if not os.path.isfile(excel_ch1):
+        raise ValueError(f"缺少单通道 WER Excel（筛选依据）: {excel_ch1}")
+
+    headers1, data1 = _read_excel_rows(excel_ch1)
+    n1 = len(data1)
+    kept_idx = _compute_kept_row_indices_ch1(data1, ranges, global_max_wer)
+    kept_ch1 = [data1[i] for i in kept_idx]
+
+    p1 = Path(excel_ch1)
+    os.makedirs(segments_dir, exist_ok=True)
+    out_ch1 = os.path.join(segments_dir, f"{p1.stem}_filter{p1.suffix}")
+    _write_filtered_excel(out_ch1, kept_ch1, headers1)
+    logger.info(
+        "ch1: %s -> %s 保留 %d/%d 行 (global_max_wer=%s, ranges=%s)",
+        excel_ch1,
+        out_ch1,
+        len(kept_ch1),
+        n1,
+        global_max_wer,
+        ranges,
+    )
+
+    if os.path.isfile(excel_ch4):
+        headers4, data4 = _read_excel_rows(excel_ch4)
+        n4 = len(data4)
+        if n4 != n1:
+            logger.warning(
+                "4ch 行数 (%d) 与 ch1 (%d) 不一致，按 ch1 下标同步；缺失下标将跳过",
+                n4,
+                n1,
+            )
+        kept_4ch: List[Dict[str, Any]] = []
+        for i in kept_idx:
+            if i < n4:
+                kept_4ch.append(data4[i])
+            else:
+                logger.warning("4ch 缺少下标 %d，未写入对应行", i)
+        p4 = Path(excel_ch4)
+        os.makedirs(segments_4ch_dir, exist_ok=True)
+        out_path_4 = os.path.join(segments_4ch_dir, f"{p4.stem}_filter{p4.suffix}")
+        _write_filtered_excel(out_path_4, kept_4ch, headers4)
+        logger.info(
+            "ch4: %s -> %s 同步 %d 行（与 ch1 筛选一致，未再按 4ch 的 wer 筛选）",
+            excel_ch4,
+            out_path_4,
+            len(kept_4ch),
+        )
+    else:
+        logger.warning("未找到 4ch Excel，跳过同步: %s", excel_ch4)
+
+    aligned_dir = os.path.join(d, "aligned")
+    if os.path.isdir(aligned_dir):
+        try:
+            shutil.rmtree(aligned_dir)
+            logger.info("已删除对齐目录以节省空间: %s", aligned_dir)
+        except OSError as e:
+            logger.warning("删除对齐目录失败 %s: %s", aligned_dir, e)
+
+
 def run_align_split_asr(
     concat_wav: str,
     recorded_1ch: str,
@@ -819,6 +1031,40 @@ def parse_args():
     p_merge.add_argument("--batch_size", type=int, default=1)
     p_merge.add_argument("--device", default="cuda:0")
 
+    p5 = sub.add_parser(
+        "filter_wer",
+        help="Stage 5: 仅按单通道 WER 筛选，四通道按同行下标同步；结果写入 segments/ 与 segments_4ch/；完成后删除 aligned/",
+    )
+    p5.add_argument(
+        "--output_dir",
+        required=True,
+        help="第四步工作目录（读 asr_wer_ch1.xlsx 做筛选；读 asr_wer_ch4.xlsx 仅按 ch1 保留行同步）",
+    )
+    p5.add_argument(
+        "--global_max_wer",
+        type=float,
+        default=1.0,
+        help="仅作用于单通道：丢弃 wer 大于该值的行；默认 1.0",
+    )
+    p5.add_argument(
+        "--ranges",
+        nargs="+",
+        required=True,
+        metavar="START:END:THR",
+        help="仅作用于单通道 Excel：闭区间 [START,END] 内仅保留 wer<=THR（并与全局上限取更严者），"
+        "数据行 0 起始下标。例: 400:700:0.45 774:903:0.15；四通道取相同行下标，不再按 4ch 的 wer 筛选",
+    )
+    p5.add_argument(
+        "--excel_ch1",
+        default=None,
+        help="单通道 Excel 路径；默认 output_dir/asr_wer_ch1.xlsx",
+    )
+    p5.add_argument(
+        "--excel_ch4",
+        default=None,
+        help="多通道 Excel 路径；默认 output_dir/asr_wer_ch4.xlsx",
+    )
+
     return parser.parse_args()
 
 
@@ -904,8 +1150,22 @@ def main():
             batch_size=args.batch_size,
             device=args.device,
         )
+    elif args.stage == "filter_wer":
+        try:
+            stage5_filter_wer(
+                args.output_dir,
+                list(args.ranges),
+                global_max_wer=args.global_max_wer,
+                excel_ch1=args.excel_ch1,
+                excel_ch4=args.excel_ch4,
+            )
+        except ValueError as e:
+            logger.error("%s", e)
+            sys.exit(1)
     else:
-        logger.error("please specify stage: concat / align / split / asr_eval / align_split_asr")
+        logger.error(
+            "please specify stage: concat / align / split / asr_eval / align_split_asr / filter_wer"
+        )
 
 
 if __name__ == "__main__":
@@ -957,5 +1217,11 @@ if __name__ == "__main__":
 #     --input_dir /path/to/batch_inputs \
 #     --segment_sec 10 \
 #     --work_dir /path/to/output_work
+#
+# # Phase 5（仅单通道按 WER/区间筛选，4ch 按同行下标同步；数据行下标从 0 起）
+# python run_audio_cat_cut.py filter_wer \
+#     --output_dir /path/to/output_work \
+#     --global_max_wer 1.0 \
+#     --ranges 400:700:0.45 774:903:0.15
 
     main()
