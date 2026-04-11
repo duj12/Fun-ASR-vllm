@@ -32,11 +32,14 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 GROUP_CFGS = [
+    {"name": "5s", "max_dur": 5.0, "pad_to": 5.0},
     {"name": "10s", "max_dur": 10.0, "pad_to": 10.0},
     {"name": "20s", "max_dur": 20.0, "pad_to": 20.0},
     {"name": "30s", "max_dur": 30.0, "pad_to": 30.0},
 ]
 HOURS_PER_FILE = 12
+# Stage1 拼接完成后整段 WAV 的峰值目标（dBFS，0 为满刻度）；约 -5 dB 峰值电平
+CONCAT_PEAK_DBFS = -5.0
 # 4ch float32->int16 写盘时分块帧数，避免与 aligned_4ch 同尺寸临时数组导致峰值内存翻倍
 WRITE_4CH_PCM_CHUNK_FRAMES = 400_000
 
@@ -165,6 +168,18 @@ def pad_silence_mc(audio: np.ndarray, target_samples: int) -> np.ndarray:
     return np.pad(audio, ((0, target_samples - len(audio)), (0, 0)), mode="constant")
 
 
+def normalize_concat_peak_dbfs(audio: np.ndarray, peak_dbfs: float = CONCAT_PEAK_DBFS) -> np.ndarray:
+    """将整段单声道 float 音频的峰值幅度调到 ``peak_dbfs`` dBFS（相对满刻度 0 dBFS）。"""
+    if audio.size == 0:
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak <= 0:
+        return audio.astype(np.float32, copy=False)
+    target = 10.0 ** (peak_dbfs / 20.0)
+    out = (audio * (target / peak)).astype(np.float32)
+    return np.clip(out, -1.0, 1.0)
+
+
 def load_pcm(path: str, channels: int = 1, dtype=np.int16,
              sr: int = SAMPLE_RATE) -> np.ndarray:
     """Load raw PCM file -> float32. Returns (N,) for mono or (N, C) for multi-channel."""
@@ -240,6 +255,13 @@ def stage1_concat(wav_scp, text_tn_file, text_itn_file, wav2dur_file,
 
             if len(buf) >= samples_per_file or i == len(utt_ids) - 1:
                 out_name = f"{gname}_{fidx:02d}"
+                peak_in = float(np.max(np.abs(buf))) if buf.size else 0.0
+                buf = normalize_concat_peak_dbfs(buf, CONCAT_PEAK_DBFS)
+                peak_out = float(np.max(np.abs(buf))) if buf.size else 0.0
+                logger.info(
+                    f"  {out_name}: peak normalize max|x| {peak_in:.5f} -> {peak_out:.5f} "
+                    f"(target {CONCAT_PEAK_DBFS} dBFS)"
+                )
                 sf.write(os.path.join(output_dir, f"{out_name}.wav"), buf, sample_rate)
                 write_text_list(os.path.join(output_dir, f"{out_name}_tn.txt"), tn_buf)
                 write_text_list(os.path.join(output_dir, f"{out_name}_itn.txt"), itn_buf)

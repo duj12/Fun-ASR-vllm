@@ -145,7 +145,35 @@ datasets=(
     # "/data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/test"
 )
 
-
+datasets1=(
+    /data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/train
+    /data/megastore/SHARE/TTS/VoiceClone1/250Hours_zh/test
+    /data/megastore/SHARE/TTS/VoiceClone1/250Hours_en/train
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.17/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.17/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.18/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.18/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.19/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.19/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.20/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.20/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.23/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.23/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.24/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.24/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.25/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.25/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.26/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.26/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.26_1/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.26_1/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.27/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.27/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.30/ch1
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_sim/3.30/ch4
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_real/0127-0315/0127-0315/train
+    /data/megastore/Datasets/ASR/SpecificDomain/WaLi_real/0127-0315/0127-0315/test
+)
 
 # 无标注数据 模型转写为text_itn, 经过正则去标点->text_tn
 # for dataset in "${datasets1[@]}"; do
@@ -208,9 +236,29 @@ datasets=(
 #     --output $dataset/sensevoice.jsonl
 # done
 
-# 全部数据合并
-for dataset in "${datasets[@]}"; do
+# # 全部数据合并
+# for dataset in "${datasets[@]}"; do
+#     sub=$(basename "$dataset")
+#     echo "run $sub"
+#     echo $dataset/sensevoice.jsonl >> /data/megastore/Datasets/ASR/jsonl/SenseVoice/train.list
+# done
+
+# 数据写成Nano的jsonl格式
+for dataset in "${datasets1[@]}"; do
     sub=$(basename "$dataset")
     echo "run $sub"
-    echo $dataset/sensevoice.jsonl >> /data/megastore/Datasets/ASR/jsonl/SenseVoice/train.list
+
+    python -u scp2nanojsonl.py \
+    --wav_scp $dataset/wav.scp \
+    --text_itn $dataset/text_itn \
+    --text_tn $dataset/text_tn \
+    --wav2dur $dataset/wav2dur \
+    --output $dataset/funasrnano.jsonl
+done
+
+# 全部数据合并
+for dataset in "${datasets1[@]}"; do
+    sub=$(basename "$dataset")
+    echo "run $sub"
+    echo $dataset/funasrnano.jsonl >> /data/megastore/Datasets/ASR/jsonl/FunASR_Nano/finetune.list
 done
